@@ -5,6 +5,24 @@ Git history starts on 2026-10-26; this file holds the record before that and the
 status of each change (compile / sim / hardware). Newest first below; older sections are
 history (marked superseded where they no longer apply).
 
+## 2026-10-27: legacy SMO removed, eSMO is the only observer
+
+- Removed the legacy `SMO_Update` (MathWorks-style SMO), `SMO_Sign`, the `SMO_USE_ESMO`
+  switch and the `smo.update` function pointer. `ESMO_Update` is renamed `SMO_Update` and is
+  called directly from `FOC_Update` / the startup state machine.
+- Removed now-unused constants `F_LPF_BEMF`, `INTEGRAL_LIMIT_PLL` and `SMO_t` fields
+  (`bldc`, `k_smo`, `bemf_gain_smo`, `lambda_smo`, `gamma_smo`, `inverse_gamma_smo`,
+  `lambda_lpf`, `gamma_lpf`, `e_alpha_est`, `e_beta_est`, `last_i_*_error`, `last_e_theta`).
+  The `ESMO_*` constants and `esmo_*` fields keep their names. The init printout now shows
+  the eSMO coefficients (F, G, z_gain).
+- Also removed the unused `SQRT3`, `SPEED_RATED`, `INTEGRAL_LIMIT_I` and `INTEGRAL_LIMIT_SPEED`
+  (no code referenced them; RAM/Flash unchanged).
+- `tools/sim/esmo_sim` lost its two legacy cases.
+- Verification: `pio run` OK (RAM 55092 B / 84.1 %, Flash 56296 B). Sim: `esmo_sim`,
+  `speed_sim` and five `startup_sim` cases print output byte-identical to the previous commit
+  (except the coefficient line). Not re-run on hardware (ISR timing not re-measured; the call is
+  now direct instead of through a pointer).
+
 ## Hand-off: state at 2026-10-26 (all hardware-verified on the bench unless noted)
 
 Testbed: Nucleo-F303RE + X-NUCLEO-IHM08M1 + Turnigy Aerodrive SK3 3542-1250KV (7 pp, no load),
@@ -37,7 +55,7 @@ Vbus, break flag, MOE, ISR cycles) prints on COM5 at 230400 bps.
   brake resistor that can absorb energy first.
 - `ESMO_OMEGA_MAX` 4000 rad/s el (~5500 rpm) caps closed-loop speed.
 - Unused/legacy: write-only calibration buffers (~6 KB RAM, partly used by the diagnostics),
-  `adc_v_c` (third shunt), legacy `SMO_Update`, `ADC_INJ_SMP` override (default 0, experiment showed
+  `adc_v_c` (third shunt), `ADC_INJ_SMP` override (default 0, experiment showed
   no effect).
 - AGENTS.md still says "Arrowdrive" and that the motor constants do not match — out of date.
 

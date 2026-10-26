@@ -1,4 +1,4 @@
-/* Host-side test of ESMO_Update (and legacy SMO_Update) against a PMSM model.
+/* Host-side test of SMO_Update (eSMO + PLL) against a PMSM model.
  * Build: see tools/sim/README.md */
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,7 +15,6 @@ static double lsb_noise(void){ return ((rand() % 5) - 2) * 0.0156; }  /* +/-2 AD
 
 typedef struct {
     const char *name;
-    bool  legacy;      /* use SMO_Update instead of ESMO_Update */
     int   dir;         /* +1 / -1 */
     double meas_alpha; /* measurement LPF alpha (1.0 = none, 0.5 = current foc_lib default) */
     double r_err, l_err; /* observer parameter error factors */
@@ -31,7 +30,6 @@ static void run(const Case *c)
     BLDC_Specs_t b = { POLE_PAIRS, I_RATED, Rs * c->r_err, Ld * c->l_err, Lq * c->l_err, Ld * c->l_err };
     SMO_t smo = {0};
     SMO_Init(&smo, &b, (float)Ts);
-    if (c->legacy) smo.update = SMO_Update;
 
     double th = 1.0, id = 0, iq = 0, ia_f = 0, ib_f = 0;
     double va_prev = 0, vb_prev = 0;
@@ -51,7 +49,7 @@ static void run(const Case *c)
         ib_f = c->meas_alpha * ib + (1 - c->meas_alpha) * ib_f;
 
         /* observer gets the voltage applied during the period that just ended */
-        bool ok = smo.update(&smo, (float)vbus, (float)va_prev, (float)vb_prev, (float)ia_f, (float)ib_f);
+        bool ok = SMO_Update(&smo, (float)vbus, (float)va_prev, (float)vb_prev, (float)ia_f, (float)ib_f);
         if (ok && !prevLock && lockTime < 0) lockTime = k;
         if (!ok && prevLock && t > 0.25) drops++;
         prevLock = ok;
@@ -88,14 +86,12 @@ int main(void)
     if (!freopen(NULL_DEVICE, "w", stdout)) { /* keep going: library prints just stay visible */ }   /* silence printf in foc_lib */
     srand(1);
     const Case cases[] = {
-        {"eSMO forward",                   false, +1, 1.0, 1.0, 1.0, 1.0},
-        {"eSMO reverse",                   false, -1, 1.0, 1.0, 1.0, 1.0},
-        {"eSMO + meas LPF a=0.5 (default)",false, +1, 0.5, 1.0, 1.0, 1.0},
-        {"eSMO Rs +30%",                   false, +1, 1.0, 1.3, 1.0, 1.0},
-        {"eSMO Ls +30%",                   false, +1, 1.0, 1.0, 1.3, 1.0},
-        {"eSMO IPM Lq=2Ld",                false, +1, 1.0, 1.0, 1.0, 2.0},
-        {"legacy SMO_Update forward",      true,  +1, 1.0, 1.0, 1.0, 1.0},
-        {"legacy SMO + meas LPF a=0.5",    true,  +1, 0.5, 1.0, 1.0, 1.0},
+        {"eSMO forward",                   +1, 1.0, 1.0, 1.0, 1.0},
+        {"eSMO reverse",                   -1, 1.0, 1.0, 1.0, 1.0},
+        {"eSMO + meas LPF a=0.5 (default)",+1, 0.5, 1.0, 1.0, 1.0},
+        {"eSMO Rs +30%",                   +1, 1.0, 1.3, 1.0, 1.0},
+        {"eSMO Ls +30%",                   +1, 1.0, 1.0, 1.3, 1.0},
+        {"eSMO IPM Lq=2Ld",                +1, 1.0, 1.0, 1.0, 2.0},
     };
     for (unsigned i = 0; i < sizeof cases / sizeof cases[0]; i++) run(&cases[i]);
     return 0;

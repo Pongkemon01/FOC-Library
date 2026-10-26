@@ -7,7 +7,6 @@
 // ============================================================================
 // Constants
 // ============================================================================
-#define SQRT3 1.73205080757f          // Square root of 3
 #define ONE_OVER_SQRT3 0.57735026919f // 1 / sqrt(3)
 #define TWO_OVER_SQRT3 1.15470053838f // 2 / sqrt(3)
 #define TWO_PI 6.28318530718f         // 2 * pi
@@ -40,7 +39,6 @@
 #define V_RATED 14.8f       // Rated voltage (V): motor spec 3-4S = 11.1-14.8 V (bench supply ~11.4 V)
 #define I_RATED 15.0f        // Rated current (A): IHM08M1 limit (15 A rms); motor spec 50-54 A max
 #define I_PEAK 30.0f         // Peak current (A): just inside the ~+-31 A sense range (1.65 V / (V_GAIN * R_SHUNT))
-#define SPEED_RATED 18500.0f // Rated speed (RPM): no-load KV * V_RATED. Not reachable here: see ESMO_OMEGA_MAX
 
 // Default motor controller parameters
 #define R_SHUNT 0.01f                                               // Shunt resistor value (Ω)
@@ -104,16 +102,10 @@
 #define BETA_LPF_MEAS (1.0f - ALPHA_LPF_MEAS) // LPF beta for current and voltage measurement
 
 // ---------------------------------------------------------------------------
-// Sliding-mode observer (SMO) parameters
+// Enhanced sliding-mode observer (eSMO) parameters  -> see SMO_Update()
 #define KP_PLL 630.0f             // PLL proportional gain
 #define KI_PLL 100000.0f          // PLL integral gain
-#define INTEGRAL_LIMIT_PLL 500.0f // PLL integral limit (rad/s)
-#define F_LPF_BEMF 200.0f         // Back-EMF LPF cutoff frequency (Hz)
 #define MIN_BEMF_AMPLITUDE 0.1f  // Minimum back-EMF amplitude for reliable estimation (V)
-
-// ---------------------------------------------------------------------------
-// Enhanced sliding-mode observer (eSMO) parameters  -> see ESMO_Update()
-#define SMO_USE_ESMO 1                // 1: SMO_Init installs ESMO_Update, 0: legacy SMO_Update
 #define ESMO_K_SLIDE_MIN 1.0f         // Minimum sliding gain (V)
 #define ESMO_K_SLIDE_MARGIN 1.5f      // Sliding gain = margin * |E_hat| (must be > 1)
 #define ESMO_BOUNDARY_GAIN 0.0f       // lambda in (0, 1+F). 0 = auto (lambda = F, deadbeat current error)
@@ -182,7 +174,6 @@
 #define CURRENT_CONTROL_O_BANDWIDTH (TWO_PI * CURRENT_CONTROL_F_BANDWIDTH) // Default current control bandwidth (rad/s)
 #define KP_I (LS * CURRENT_CONTROL_O_BANDWIDTH)                            // D and Q axis current controller proportional gain
 #define KI_I (RS * CURRENT_CONTROL_O_BANDWIDTH)                            // D and Q axis current controller integral gain
-#define INTEGRAL_LIMIT_I 6.0f                                              // D and Q-axis current controller integral limit
 // Speed loop: runs inside FOC_Update (MOTOR_RUNNING, FOC_SPEED_CONTROL) every SPEED_CTRL_DIVIDER
 // periods. Speeds are electrical rad/s. Plant: d(omega_el)/dt = SPEED_PLANT_GAIN * iq, with
 // SPEED_PLANT_GAIN = 1.5 * pp^2 * psi / J; bench 2026-10-26: 3 A gave ~9800 rad/s^2 el unloaded.
@@ -193,7 +184,6 @@
 #define SPEED_CTRL_BANDWIDTH (TWO_PI * 10.0f)                              // Speed loop crossover (rad/s), well below the PLL
 #define KP_SPEED (SPEED_CTRL_BANDWIDTH / SPEED_PLANT_GAIN)                 // Speed controller proportional gain (A per rad/s el)
 #define KI_SPEED (KP_SPEED * SPEED_CTRL_BANDWIDTH * 0.25f)                 // Speed controller integral gain (PI zero at bandwidth/4)
-#define INTEGRAL_LIMIT_SPEED 50.0f                                         // Speed controller integral limit
 #define SPEED_REF_SLEW 2000.0f                                             // Speed reference ramp (rad/s^2 el)
 #define V_BUS_MIN 8.0f                                                     // Minimum bus voltage to calibrate or start (V): supply off/low
 #define CAL_PARAM_TOL 4.0f                                                 // Calibrated Rs/Ld/Lq accepted within RS,LS / tol .. * tol
@@ -272,51 +262,21 @@ typedef struct
     float Ls; // Stator inductance (average of Ld and Lq)
 } BLDC_Specs_t;
 
-// Sliding-mode observer structure
-typedef struct SMO_s
+// Enhanced sliding-mode observer (eSMO + PLL) structure
+typedef struct
 {
-    // Pointer to sliding-mode observer update function (to be called at each sampling period)
-    // This pointer allows for flexibility in choosing different observer implementations if needed.
-    bool (*update)(struct SMO_s *smo, float v_bus, float v_alpha, float v_beta, float i_alpha_meas, float i_beta_meas);
-
-    // Link to BLDC specifications
-    BLDC_Specs_t *bldc;
-
     // PLL for rotor position and speed estimation
     PI_Controller_t pll;
     float sampling_time;
     float theta_est;
     float omega_est;
 
-    // Sliding-mode gain
-    float k_smo;
-
-    // Back-EMF observer gain
-    float bemf_gain_smo;
-
-    // Pre-computed SMO coefficients
-    float lambda_smo;
-    float gamma_smo;
-    float inverse_gamma_smo; // Inverse of gamma_smo for efficiency
-
-    // Pre-computed LPF coefficients
-    float lambda_lpf;
-    float gamma_lpf;
-
-    // parameters
+    // Observer states
     float e_alpha_filtered;
     float e_beta_filtered;
-    float e_alpha_est;
-    float e_beta_est;
     float i_alpha_est;
     float i_beta_est;
 
-    // Last measured errors
-    float last_i_alpha_error;
-    float last_i_beta_error;
-    float last_e_theta;
-
-    // ---- eSMO (ESMO_Update) additions ----
     // Pre-computed in SMO_Compute_Coefficients() (rerun on BLDC spec / Ts change)
     float esmo_F;         // Current-model pole exp(-Rs*Ts/Ld)
     float esmo_G;         // Current-model gain (1 - F)/Rs (A/V)
@@ -335,7 +295,7 @@ typedef struct SMO_s
     float theta_emf;        // PLL angle of the back-EMF vector (rad, 0..2pi)
     float pll_err_filtered; // Smoothed normalised PLL error, sin(angle error)
     float emf_magnitude;    // |E_hat| (V)
-    bool locked;            // Lock state reported by ESMO_Update
+    bool locked;            // Lock state reported by SMO_Update
     uint16_t unlock_count;  // Consecutive samples failing the lock criterion
 } SMO_t;
 
@@ -465,9 +425,7 @@ extern "C"
     void SMO_Init(SMO_t *smo, BLDC_Specs_t *bldc, float sampling_time);
     void SMO_Reset(SMO_t *smo);
     void SMO_BLDC_Specs_Update(SMO_t *smo, BLDC_Specs_t *bldc, float sampling_time);
-    bool SMO_Update(SMO_t *smo, float v_bus, float v_alpha, float v_beta, float i_alpha_meas, float i_beta_meas); // Returns true if successful
-    bool ESMO_Update(SMO_t *smo, float v_bus, float v_alpha, float v_beta, float i_alpha_meas, float i_beta_meas); // Enhanced SMO + PLL; returns true while locked
-    float SMO_Sign(float x, float delta);
+    bool SMO_Update(SMO_t *smo, float v_bus, float v_alpha, float v_beta, float i_alpha_meas, float i_beta_meas); // Enhanced SMO + PLL; returns true while locked
 
     // FOC control functions
     void FOC_Init(FOC_t *foc, uint32_t pwm_res, uint32_t adc_offset);

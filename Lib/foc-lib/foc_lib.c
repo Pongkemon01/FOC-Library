@@ -251,7 +251,7 @@ static inline bool Trig_In_Range(float angle)
 
 //---------------------------------------------------------------------------
 // Sine and cosine for an angle in [0, 2pi] (no range check).
-// Used by ESMO_Update and by the slow paths. The mask is a cheap memory-safety
+// Used by SMO_Update and by the slow paths. The mask is a cheap memory-safety
 // net for callers that break the precondition.
 static inline void Sin_Cos_Wrapped(float angle, float *sin_out, float *cos_out)
 {
@@ -582,21 +582,6 @@ void Calculate_Phase_Currents(uint16_t adc_u, uint16_t adc_v, uint16_t offset_u,
 // ============================================================================
 
 // ---------------------------------------------------------------------------
-// Sign function with boundary layer
-float SMO_Sign(float x, float delta)
-{
-    // float x_delta = (delta > 0.0f) ? delta : -delta; // Ensure delta is non-negative
-
-    if (x >= delta)
-        return 1.0f;
-
-    if (x <= -delta)
-        return -1.0f;
-
-    return x / delta;
-}
-
-// ---------------------------------------------------------------------------
 // Pre-compute the discrete current-observer coefficients.
 // Guards against a degenerate Rs/Ls (e.g. a failed calibration), which would
 // otherwise produce inf/NaN coefficients and poison every later SMO update.
@@ -614,13 +599,7 @@ static void SMO_Compute_Coefficients(SMO_t *smo, BLDC_Specs_t *bldc, float sampl
         Ls = LS;
     }
 
-    smo->lambda_smo = expf((-Rs * sampling_time) / Ls);
-    smo->gamma_smo = (1.0f - smo->lambda_smo) / Rs;
-
-    // gamma_smo collapses to 0 only if lambda_smo == 1 (Ts negligible vs Ls/Rs)
-    smo->inverse_gamma_smo = (smo->gamma_smo > 1e-12f) ? (1.0f / smo->gamma_smo) : 0.0f;
-
-    // ---- eSMO coefficients: everything that depends only on Rs, Ld, Lq, Ts ----
+    // Everything that depends only on Rs, Ld, Lq, Ts
     // Current model uses Ld (extended-EMF form, valid for salient motors too)
     float Ld = (bldc->Ld > 1e-9f) ? bldc->Ld : Ls;
     float Lq = (bldc->Lq > 1e-9f) ? bldc->Lq : Ld;
@@ -655,8 +634,8 @@ static void SMO_Compute_Coefficients(SMO_t *smo, BLDC_Specs_t *bldc, float sampl
 
     smo->esmo_delay_ts = ESMO_DELAY_COMP * sampling_time;
 
-    printf("   SMO coefficients: lambda_smo = %f, gamma_smo = %f, inverse_gamma_smo = %f\r\n",
-           smo->lambda_smo, smo->gamma_smo, smo->inverse_gamma_smo);
+    printf("   SMO coefficients: F = %f, G = %f, z_gain = %f\r\n",
+           smo->esmo_F, smo->esmo_G, smo->esmo_z_gain);
 }
 
 // ---------------------------------------------------------------------------
@@ -669,28 +648,13 @@ void SMO_Init(SMO_t *smo, BLDC_Specs_t *bldc, float sampling_time)
         return;
     }
 
-    smo->bldc = bldc;
     PI_Init(&(smo->pll), KP_PLL, KI_PLL, sampling_time, PI_NO_OUTPUT_LIMIT);
-
-    // Select the observer once here. SMO_Reset() no longer overrides this choice.
-#if SMO_USE_ESMO
-    smo->update = ESMO_Update;
-#else
-    smo->update = SMO_Update;
-#endif
-
-    smo->k_smo = 5.0f;
-    smo->bemf_gain_smo = 0.5f; // 0 < bemf_gain_smo < 1, adjust based on motor characteristics
 
     smo->sampling_time = sampling_time;
     SMO_Reset(smo);
 
     // Pre-computed SMO coefficients
     SMO_Compute_Coefficients(smo, bldc, sampling_time);
-
-    // Pre-computed LPF coefficients
-    smo->lambda_lpf = expf(-(TWO_PI * F_LPF_BEMF) * sampling_time);
-    smo->gamma_lpf = 1.0f - smo->lambda_lpf;
 }
 
 // ---------------------------------------------------------------------------
@@ -702,26 +666,13 @@ void SMO_Reset(SMO_t *smo)
         return;
     }
 
-    // Keep the observer chosen in SMO_Init(); only fall back if none is set
-    if (smo->update == NULL)
-    {
-        smo->update = SMO_Update;
-    }
-
     PI_Reset(&(smo->pll));
     smo->theta_est = 0.0f;
     smo->omega_est = 0.0f;
-    smo->e_alpha_est = 0.0f;
-    smo->e_beta_est = 0.0f;
     smo->e_alpha_filtered = 0.0f;
     smo->e_beta_filtered = 0.0f;
     smo->i_alpha_est = 0.0f;
     smo->i_beta_est = 0.0f;
-    smo->last_i_alpha_error = 0.0f;
-    smo->last_i_beta_error = 0.0f;
-    smo->last_e_theta = 0.0f;
-
-    // eSMO states
     smo->k_slide = ESMO_K_SLIDE_MIN;
     smo->theta_emf = 0.0f;
     smo->pll_err_filtered = 1.0f; // Start "unlocked"
@@ -739,7 +690,6 @@ void SMO_BLDC_Specs_Update(SMO_t *smo, BLDC_Specs_t *bldc, float sampling_time)
         return;
     }
 
-    smo->bldc = bldc;
     smo->sampling_time = sampling_time;
 
     // Reset SMO states
@@ -747,100 +697,6 @@ void SMO_BLDC_Specs_Update(SMO_t *smo, BLDC_Specs_t *bldc, float sampling_time)
 
     // Pre-computed SMO coefficients
     SMO_Compute_Coefficients(smo, bldc, sampling_time);
-}
-
-// ---------------------------------------------------------------------------
-// Function to update SMO estimates
-// Returns true if successful
-// reference: https://www.mathworks.com/help/mcb/ref/slidingmodeobserver.html#mw_753c13aa-dd04-4172-9ccf-d469fedead4d
-bool SMO_Update(SMO_t *smo, float v_bus, float v_alpha, float v_beta, float i_alpha_meas, float i_beta_meas)
-{
-    if (smo == NULL)
-    {
-        return false;
-    }
-
-    // Step 1: Calculate errors
-    float i_alpha_error = smo->i_alpha_est - i_alpha_meas;
-    float i_beta_error = smo->i_beta_est - i_beta_meas;
-
-    // Step 2: Calculate sliding-mode correction terms (z)
-    float z_alpha = smo->k_smo * SMO_Sign(i_alpha_error, 0.1f);
-    float z_beta = smo->k_smo * SMO_Sign(i_beta_error, 0.1f);
-
-    // Step 2.1: Calculate last sliding-mode correction terms
-    float last_z_alpha = smo->k_smo * SMO_Sign(smo->last_i_alpha_error, 0.1f);
-    float last_z_beta = smo->k_smo * SMO_Sign(smo->last_i_beta_error, 0.1f);
-
-    // Step 3: Estimate stator currents
-    smo->i_alpha_est = smo->lambda_smo * smo->i_alpha_est + smo->gamma_smo * (v_alpha - smo->e_alpha_est) - z_alpha;
-    smo->i_beta_est = smo->lambda_smo * smo->i_beta_est + smo->gamma_smo * (v_beta - smo->e_beta_est) - z_beta;
-
-    // Step 4: Update back-EMF estimates (raw)
-    // smo->e_alpha_est = z_alpha;
-    // smo->e_beta_est = z_beta;
-    smo->e_alpha_est += smo->inverse_gamma_smo * smo->bemf_gain_smo * (i_alpha_error - smo->lambda_smo * smo->last_i_alpha_error + last_z_alpha);
-    smo->e_beta_est += smo->inverse_gamma_smo * smo->bemf_gain_smo * (i_beta_error - smo->lambda_smo * smo->last_i_beta_error + last_z_beta);
-
-    // Update last measured errors
-    smo->last_i_alpha_error = i_alpha_error;
-    smo->last_i_beta_error = i_beta_error;
-
-    // Step 5: Low-pass filter the back-EMF estimates
-    smo->e_alpha_filtered = smo->lambda_lpf * smo->e_alpha_filtered + smo->gamma_lpf * smo->e_alpha_est;
-    smo->e_beta_filtered = smo->lambda_lpf * smo->e_beta_filtered + smo->gamma_lpf * smo->e_beta_est;
-
-    // Step 6: Update position estimate with filtered back-EMF only if above minimum emf
-    float emf_magnitude = Fast_Sqrt(smo->e_alpha_filtered * smo->e_alpha_filtered +
-                                smo->e_beta_filtered * smo->e_beta_filtered);
-    smo->emf_magnitude = emf_magnitude; // Used by the startup plausibility check
-
-    if (emf_magnitude <= MIN_BEMF_AMPLITUDE)
-    {
-        printf("SMO_Update: Back-EMF magnitude too low (%f), skipping position update\r\n", emf_magnitude);
-        smo->omega_est = 0.0f; // Assume zero speed
-        // Retain previous position estimate
-
-        return false; // Not enough back-EMF for reliable estimation
-    }
-    else
-    {
-        // Step 6.1: Calculate position error (phase detector)
-        // float sin_theta, cos_theta;
-        // Fast_Sin_Cos(smo->theta_est, &sin_theta, &cos_theta); // Current estimated values
-        // float error = smo->e_alpha_filtered * cos_theta - smo->e_beta_filtered * sin_theta;
-
-        // // Step 6.2: PI controller
-        // smo->omega_est = PI_Update(&(smo->pll), error);
-
-        // // Step 6.3: Integrate velocity to get position
-        // smo->theta_est += smo->omega_est * smo->pll.Ts;
-
-        float e_theta = Fast_Atan2(smo->e_beta_filtered, smo->e_alpha_filtered);
-        if (smo->omega_est > 0.0f)
-            smo->theta_est = e_theta - HALF_PI; // Adjust for forward rotation
-        else
-            smo->theta_est = e_theta + HALF_PI; // Adjust for reverse rotation
-
-        if (smo->theta_est < 0.0f)
-            smo->theta_est += TWO_PI;
-        else if (smo->theta_est > TWO_PI)
-            smo->theta_est -= TWO_PI;
-
-        float delta_theta = e_theta - smo->last_e_theta;
-        if (delta_theta > PI)
-            delta_theta -= TWO_PI;
-        if (delta_theta < -PI)
-            delta_theta += TWO_PI;
-
-        float omega = delta_theta / smo->sampling_time;
-        // lambda_lpf is the filter pole (retained fraction), gamma_lpf the new-sample weight
-        smo->omega_est = (smo->omega_est * smo->lambda_lpf) + (omega * smo->gamma_lpf);
-
-        smo->last_e_theta = e_theta;
-
-        return true; // Successful update
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -857,7 +713,6 @@ static inline float Wrap_Once(float a)
 
 // ---------------------------------------------------------------------------
 // Enhanced sliding-mode observer (eSMO) with PLL.
-// Same interface as SMO_Update, so it can be installed in smo->update.
 //
 // Structure follows TI's eSMO (Motor Control SDK Universal Lab, SPRUJ26 2.3.1):
 //   current model with E_hat inside  ->  saturated sliding term z  ->
@@ -873,7 +728,7 @@ static inline float Wrap_Once(float a)
 // Outputs: smo->theta_est (rad, 0..2pi), smo->omega_est (electrical rad/s).
 // Returns true while the observer is locked (with hysteresis), false otherwise.
 // Runs in the PWM ISR: no printf in here.
-bool ESMO_Update(SMO_t *smo, float v_bus, float v_alpha, float v_beta, float i_alpha_meas, float i_beta_meas)
+bool SMO_Update(SMO_t *smo, float v_bus, float v_alpha, float v_beta, float i_alpha_meas, float i_beta_meas)
 {
     if (smo == NULL)
     {
@@ -887,7 +742,7 @@ bool ESMO_Update(SMO_t *smo, float v_bus, float v_alpha, float v_beta, float i_a
     float e_beta = smo->e_beta_filtered;
 
     // Step 1+2: Sliding feedback z = k*sat(err/phi), phi = k*G/lambda, which is
-    // identical to clamp((lambda/G)*err, -k, k): no division, no SMO_Sign call.
+    // identical to clamp((lambda/G)*err, -k, k): no division.
     float z_alpha = CONSTRAIN(smo->esmo_z_gain * (smo->i_alpha_est - i_alpha_meas), -k, k);
     float z_beta = CONSTRAIN(smo->esmo_z_gain * (smo->i_beta_est - i_beta_meas), -k, k);
 
@@ -1454,7 +1309,7 @@ void FOC_Current_Loop_Update(FOC_t *foc)
     Clarke_Transform(foc->i_a, foc->i_b, &(foc->i_alpha), &(foc->i_beta));
 
     // Estimate rotor position and speed using SMO
-    if (foc->smo.update(&(foc->smo), foc->v_bus, foc->v_alpha, foc->v_beta, foc->i_alpha, foc->i_beta) == false)
+    if (SMO_Update(&(foc->smo), foc->v_bus, foc->v_alpha, foc->v_beta, foc->i_alpha, foc->i_beta) == false)
     {
         // Lost the observer: disable the outputs and fault out. Do NOT fall back
         // to MOTOR_IDLE alone, which would immediately re-enter the startup.
@@ -1618,8 +1473,8 @@ void FOC_BLDC_Startup_Update(FOC_t *foc)
 
         // Observer runs alongside (it never drives the transforms here)
         Clarke_Transform(foc->i_a, foc->i_b, &(foc->i_alpha), &(foc->i_beta));
-        bool locked = foc->smo.update(&(foc->smo), foc->v_bus, foc->v_alpha, foc->v_beta,
-                                      foc->i_alpha, foc->i_beta);
+        bool locked = SMO_Update(&(foc->smo), foc->v_bus, foc->v_alpha, foc->v_beta,
+                                 foc->i_alpha, foc->i_beta);
         FOC_Current_Control(foc);
 
         // Count consecutive periods where the observer is locked, its speed agrees
@@ -1654,8 +1509,8 @@ void FOC_BLDC_Startup_Update(FOC_t *foc)
 
     case MOTOR_STARTUP_TRANSITION:
         Clarke_Transform(foc->i_a, foc->i_b, &(foc->i_alpha), &(foc->i_beta));
-        if (!foc->smo.update(&(foc->smo), foc->v_bus, foc->v_alpha, foc->v_beta,
-                             foc->i_alpha, foc->i_beta))
+        if (!SMO_Update(&(foc->smo), foc->v_bus, foc->v_alpha, foc->v_beta,
+                        foc->i_alpha, foc->i_beta))
         {
             FOC_Coast(foc);
             return;
