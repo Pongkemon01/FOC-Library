@@ -70,7 +70,16 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
-
+  // Copy the time-critical code (FOC_FAST_CODE, section .ccmram) from flash into CCM SRAM
+  // before anything can call it. The startup file only copies .data. Symbols from the
+  // stock linker script; an empty section makes this a no-op.
+  extern uint32_t _siccmram, _sccmram, _eccmram;
+  for (uint32_t *src = &_siccmram, *dst = &_sccmram; dst < &_eccmram;)
+  {
+    *dst++ = *src++;
+  }
+  __DSB();
+  __ISB(); // Fetch the copied code, not anything prefetched before the copy
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/

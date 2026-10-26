@@ -3,6 +3,14 @@
 #include "foc_lib.h"
 #include <string.h> // memcpy (bit test in Trig_In_Range)
 
+// Force-inline the small helpers on the ISR path (FOC_Update): an out-of-line call
+// costs the call itself plus reloading every foc-> field it needs afterwards.
+#if defined(__GNUC__)
+#define FOC_INLINE static inline __attribute__((always_inline))
+#else
+#define FOC_INLINE static inline
+#endif
+
 // ============================================================================
 // FUNCTION DEFINITIONS
 // ============================================================================
@@ -19,7 +27,7 @@ void PI_Init(PI_Controller_t *controller, float Kp, float Ki, float sampling_tim
 }
 
 // ---------------------------------------------------------------------------
-void PI_Reset(PI_Controller_t *controller)
+FOC_FAST_CODE void PI_Reset(PI_Controller_t *controller)
 {
     if (controller == NULL)
     {
@@ -45,6 +53,13 @@ void PI_Change_Params(PI_Controller_t *controller, float Kp, float Ki, float sam
     // current loop, i.e. no anti-windup at all. Kp/Ki also gave inf/NaN for Ki = 0.)
     controller->Kb = (Kp > 0.0f) ? (Ki / Kp) : 0.0f;
     controller->integral = 0.0f;
+
+    // Per-step products, so PI_Step needs no multiply by Ts. Kb*Ts is capped at 1
+    // (full reset to the limit in one step); above 1 it over-corrects and can
+    // oscillate (the speed loop has Ki/Kp*Ts = 2).
+    controller->Ki_Ts = Ki * sampling_time;
+    float kb_ts = controller->Kb * sampling_time;
+    controller->Kb_Ts = (kb_ts < 1.0f) ? kb_ts : 1.0f;
 }
 
 // ----------------------------------------------------------------------------
@@ -59,19 +74,15 @@ void PI_Set_Output_Limit(PI_Controller_t *controller, float output_limit)
 }
 
 // ----------------------------------------------------------------------------
-float PI_Update(PI_Controller_t *controller, float error)
+// PI step without the NULL check, inlined into the ISR callers
+FOC_INLINE float PI_Step(PI_Controller_t *controller, float error)
 {
-    if (controller == NULL)
-    {
-        return 0.0f;
-    }
-
     // Proportional term
     float P_out = controller->Kp * error;
 
     // Integral increment (forward Euler: the output below uses the previous
     // integral state, and the state is advanced afterwards)
-    float integral = controller->Ki * error * controller->Ts;
+    float integral = controller->Ki_Ts * error;
 
     // Combine to the un-capped outputs
     float output = P_out + controller->integral;
@@ -80,19 +91,25 @@ float PI_Update(PI_Controller_t *controller, float error)
     if (controller->output_limit >= 0.0f)
     {
         float saturated_output = CONSTRAIN(output, -(controller->output_limit), controller->output_limit);
-        // Back-calculation: bleed the integrator by Kt*Ts*(u_sat - u). Kt*Ts is capped
-        // at 1 (full reset to the limit in one step); above 1 it over-corrects and can
-        // oscillate (the speed loop has Ki/Kp*Ts = 2).
-        float kt_ts = controller->Kb * controller->Ts;
-        kt_ts = (kt_ts < 1.0f) ? kt_ts : 1.0f; // Not fminf: a library call on Cortex-M4
-        integral += (saturated_output - output) * kt_ts; // Anti-windup correction
-        output = saturated_output;                                                 // Clamp the output to the specified limits
+        // Back-calculation: bleed the integrator by Kt*Ts*(u_sat - u), Kt*Ts capped at 1
+        integral += (saturated_output - output) * controller->Kb_Ts; // Anti-windup correction
+        output = saturated_output;                                   // Clamp the output to the specified limits
     }
 
     // Update the integral state for the next iteration
     controller->integral += integral;
 
     return output;
+}
+
+float PI_Update(PI_Controller_t *controller, float error)
+{
+    if (controller == NULL)
+    {
+        return 0.0f;
+    }
+
+    return PI_Step(controller, error);
 }
 
 //===========================================================================
@@ -154,7 +171,7 @@ void Init_Trigonometric_Tables(void)
 // Normalize angle to [0, 2pi)
 // Fast paths cover the common cases (already in range, or one turn out) with
 // compares only; fmodf is used only for angles more than one turn out.
-void Normalize_Angle(float *angle)
+FOC_FAST_CODE void Normalize_Angle(float *angle)
 {
     float a = *angle;
 
@@ -265,20 +282,20 @@ static inline void Sin_Cos_Wrapped(float angle, float *sin_out, float *cos_out)
 }
 
 // Slow paths: wrap the angle into [0, 2pi), then the same interpolation
-TRIG_NOINLINE static void Fast_Sin_Cos_Slow(float angle, float *sin_out, float *cos_out)
+FOC_FAST_CODE TRIG_NOINLINE static void Fast_Sin_Cos_Slow(float angle, float *sin_out, float *cos_out)
 {
     Normalize_Angle(&angle);
     Sin_Cos_Wrapped(angle, sin_out, cos_out);
 }
 
-TRIG_NOINLINE static float Fast_Sin_Slow(float angle)
+FOC_FAST_CODE TRIG_NOINLINE static float Fast_Sin_Slow(float angle)
 {
     float s, c;
     Fast_Sin_Cos_Slow(angle, &s, &c);
     return s;
 }
 
-TRIG_NOINLINE static float Fast_Cos_Slow(float angle)
+FOC_FAST_CODE TRIG_NOINLINE static float Fast_Cos_Slow(float angle)
 {
     float s, c;
     Fast_Sin_Cos_Slow(angle, &s, &c);
@@ -287,7 +304,7 @@ TRIG_NOINLINE static float Fast_Cos_Slow(float angle)
 
 //----------------------------------------------------------------------------
 // Sine (any angle)
-float Fast_Sin(float angle)
+FOC_FAST_CODE float Fast_Sin(float angle)
 {
     if (TRIG_UNLIKELY(!Trig_In_Range(angle)))
     {
@@ -302,7 +319,7 @@ float Fast_Sin(float angle)
 
 //----------------------------------------------------------------------------
 // Cosine (any angle)
-float Fast_Cos(float angle)
+FOC_FAST_CODE float Fast_Cos(float angle)
 {
     if (TRIG_UNLIKELY(!Trig_In_Range(angle)))
     {
@@ -330,7 +347,7 @@ static inline void Trig_Interp_Sin_Cos(int i, float frac, float *sin_out, float 
 
 //---------------------------------------------------------------------------
 // Sine and cosine (any angle)
-void Fast_Sin_Cos(float angle, float *sin_out, float *cos_out)
+FOC_FAST_CODE void Fast_Sin_Cos(float angle, float *sin_out, float *cos_out)
 {
     if (TRIG_UNLIKELY(!Trig_In_Range(angle)))
     {
@@ -353,7 +370,7 @@ void Fast_Sin_Cos(float angle, float *sin_out, float *cos_out)
 #define ATAN_A9 0.05264734849333763f
 #define ATAN_A11 -0.011719133704900742f
 
-float Fast_Atan2(float y, float x)
+FOC_FAST_CODE float Fast_Atan2(float y, float x)
 {
     if (isnan(x) || isnan(y))
     {
@@ -395,7 +412,7 @@ float Fast_Atan2(float y, float x)
 // compiles to unless -fno-math-errno is given.
 // (The previous Newton iteration started from x itself and did not converge
 //  in 5 steps outside roughly [0.5, 50]: e.g. Fast_Sqrt(10000) was 323.)
-float Fast_Sqrt(float x)
+FOC_FAST_CODE float Fast_Sqrt(float x)
 {
     if (x <= 0.0f)
     {
@@ -415,9 +432,9 @@ float Fast_Sqrt(float x)
 //===========================================================================
 
 // ---------------------------------------------------------------------------
-// Space Vector PWM Modulation
-void SVPWM_Modulation(float v_alpha, float v_beta, float v_dc, uint32_t pwm_period,
-                      uint32_t *pwm_u, uint32_t *pwm_v, uint32_t *pwm_w)
+// Space Vector PWM Modulation (inlined into FOC_Update; SVPWM_Modulation wraps it)
+FOC_INLINE void SVPWM_Core(float v_alpha, float v_beta, float v_dc, uint32_t pwm_period,
+                           uint32_t *pwm_u, uint32_t *pwm_v, uint32_t *pwm_w)
 {
     int32_t max_pwm = (int32_t)pwm_period - 2; // Ensure we don't exceed the period
 
@@ -473,6 +490,12 @@ void SVPWM_Modulation(float v_alpha, float v_beta, float v_dc, uint32_t pwm_peri
     *pwm_w = (uint32_t)CONSTRAIN(duty_w, 0, max_pwm);
 }
 
+void SVPWM_Modulation(float v_alpha, float v_beta, float v_dc, uint32_t pwm_period,
+                      uint32_t *pwm_u, uint32_t *pwm_v, uint32_t *pwm_w)
+{
+    SVPWM_Core(v_alpha, v_beta, v_dc, pwm_period, pwm_u, pwm_v, pwm_w);
+}
+
 // ---------------------------------------------------------------------------
 // CLARKE TRANSFORM (abc → αβ)
 // Simplified Clarke (only need 2 phase currents)
@@ -486,7 +509,7 @@ void Clarke_Transform(float i_a, float i_b, float *i_alpha, float *i_beta)
 // PARK TRANSFORM (αβ → dq)
 // The transforms inline the table look-up. For theta outside [0, 2pi) they
 // tail-call a noinline slow variant, so the fast path needs no stack frame.
-TRIG_NOINLINE static void Park_Transform_Slow(float i_alpha, float i_beta, float theta, float *i_d, float *i_q)
+FOC_FAST_CODE TRIG_NOINLINE static void Park_Transform_Slow(float i_alpha, float i_beta, float theta, float *i_d, float *i_q)
 {
     float cos_theta, sin_theta;
     Fast_Sin_Cos_Slow(theta, &sin_theta, &cos_theta);
@@ -494,7 +517,8 @@ TRIG_NOINLINE static void Park_Transform_Slow(float i_alpha, float i_beta, float
     *i_q = -sin_theta * i_alpha + cos_theta * i_beta;
 }
 
-void Park_Transform(float i_alpha, float i_beta, float theta, float *i_d, float *i_q)
+// Inlined into the current loop; Park_Transform wraps it
+FOC_INLINE void Park_Core(float i_alpha, float i_beta, float theta, float *i_d, float *i_q)
 {
     if (TRIG_UNLIKELY(!Trig_In_Range(theta)))
     {
@@ -511,7 +535,12 @@ void Park_Transform(float i_alpha, float i_beta, float theta, float *i_d, float 
     *i_q = -sin_theta * i_alpha + cos_theta * i_beta;
 }
 
-void Clarke_Park_Transform(float i_a, float i_b, float theta,
+FOC_FAST_CODE void Park_Transform(float i_alpha, float i_beta, float theta, float *i_d, float *i_q)
+{
+    Park_Core(i_alpha, i_beta, theta, i_d, i_q);
+}
+
+FOC_FAST_CODE void Clarke_Park_Transform(float i_a, float i_b, float theta,
                            float *i_d, float *i_q)
 {
     // Clarke Transform
@@ -522,7 +551,7 @@ void Clarke_Park_Transform(float i_a, float i_b, float theta,
     Park_Transform(i_alpha, i_beta, theta, i_d, i_q);
 }
 
-TRIG_NOINLINE static void Inverse_Park_Transform_Slow(float v_d, float v_q, float theta, float *v_alpha, float *v_beta)
+FOC_FAST_CODE TRIG_NOINLINE static void Inverse_Park_Transform_Slow(float v_d, float v_q, float theta, float *v_alpha, float *v_beta)
 {
     float cos_theta, sin_theta;
     Fast_Sin_Cos_Slow(theta, &sin_theta, &cos_theta);
@@ -530,7 +559,8 @@ TRIG_NOINLINE static void Inverse_Park_Transform_Slow(float v_d, float v_q, floa
     *v_beta = sin_theta * v_d + cos_theta * v_q;
 }
 
-void Inverse_Park_Transform(float v_d, float v_q, float theta, float *v_alpha, float *v_beta)
+// Inlined into FOC_Update; Inverse_Park_Transform wraps it
+FOC_INLINE void Inverse_Park_Core(float v_d, float v_q, float theta, float *v_alpha, float *v_beta)
 {
     if (TRIG_UNLIKELY(!Trig_In_Range(theta)))
     {
@@ -545,6 +575,11 @@ void Inverse_Park_Transform(float v_d, float v_q, float theta, float *v_alpha, f
 
     *v_alpha = cos_theta * v_d - sin_theta * v_q;
     *v_beta = sin_theta * v_d + cos_theta * v_q;
+}
+
+void Inverse_Park_Transform(float v_d, float v_q, float theta, float *v_alpha, float *v_beta)
+{
+    Inverse_Park_Core(v_d, v_q, theta, v_alpha, v_beta);
 }
 
 // ---------------------------------------------------------------------------
@@ -563,18 +598,12 @@ void Calculate_Phase_Currents(uint16_t adc_u, uint16_t adc_v, uint16_t offset_u,
     int32_t eff_adc_u = (int32_t)adc_u - (int32_t)offset_u;
     int32_t eff_adc_v = (int32_t)adc_v - (int32_t)offset_v;
 
-    // Convert ADC values to voltages
-    float v_a = (float)(eff_adc_u)*ADC_2_VOLT;
-    float v_b = (float)(eff_adc_v)*ADC_2_VOLT;
-
-    // Convert voltages to currents using shunt resistor
-    float i_a_shunt = v_a * V_2_CURRENT;
-    float i_b_shunt = v_b * V_2_CURRENT;
-
-    // Apply low-pass filter to measured currents, carrying the previous
-    // filtered value held in *i_a / *i_b as the filter state.
-    *i_a = ALPHA_LPF_MEAS * i_a_shunt + BETA_LPF_MEAS * (*i_a);
-    *i_b = ALPHA_LPF_MEAS * i_b_shunt + BETA_LPF_MEAS * (*i_b);
+    // ADC counts -> shunt current -> low-pass filter, carrying the previous filtered
+    // value held in *i_a / *i_b as the filter state. ALPHA * ADC_2_CURRENT folds into
+    // one constant at compile time, so each phase is one multiply and one multiply-add.
+    const float k_in = ALPHA_LPF_MEAS * ADC_2_CURRENT;
+    *i_a = (float)eff_adc_u * k_in + BETA_LPF_MEAS * (*i_a);
+    *i_b = (float)eff_adc_v * k_in + BETA_LPF_MEAS * (*i_b);
 }
 
 // ============================================================================
@@ -626,6 +655,8 @@ static void SMO_Compute_Coefficients(SMO_t *smo, BLDC_Specs_t *bldc, float sampl
     // At the clamps a is constant, so precompute it there (already times 1/kappa).
     smo->esmo_wc_lo = ESMO_WC_MIN;
     smo->esmo_wc_hi = ESMO_WC_MAX_TS / sampling_time;
+    smo->esmo_ratio_ts = ESMO_WC_RATIO * sampling_time;
+    smo->esmo_x_lo = ESMO_WC_MIN * sampling_time;
     smo->esmo_a_lo = (1.0f - expf(-smo->esmo_wc_lo * sampling_time)) * smo->esmo_inv_kappa;
     smo->esmo_a_hi = (1.0f - expf(-ESMO_WC_MAX_TS)) * smo->esmo_inv_kappa;
 
@@ -659,7 +690,7 @@ void SMO_Init(SMO_t *smo, BLDC_Specs_t *bldc, float sampling_time)
 
 // ---------------------------------------------------------------------------
 // Function to reset SMO states
-void SMO_Reset(SMO_t *smo)
+FOC_FAST_CODE void SMO_Reset(SMO_t *smo)
 {
     if (smo == NULL)
     {
@@ -691,6 +722,7 @@ void SMO_BLDC_Specs_Update(SMO_t *smo, BLDC_Specs_t *bldc, float sampling_time)
     }
 
     smo->sampling_time = sampling_time;
+    PI_Change_Params(&(smo->pll), smo->pll.Kp, smo->pll.Ki, sampling_time); // Refresh pll.Ki_Ts
 
     // Reset SMO states
     SMO_Reset(smo);
@@ -728,7 +760,7 @@ static inline float Wrap_Once(float a)
 // Outputs: smo->theta_est (rad, 0..2pi), smo->omega_est (electrical rad/s).
 // Returns true while the observer is locked (with hysteresis), false otherwise.
 // Runs in the PWM ISR: no printf in here.
-bool SMO_Update(SMO_t *smo, float v_bus, float v_alpha, float v_beta, float i_alpha_meas, float i_beta_meas)
+FOC_FAST_CODE bool SMO_Update(SMO_t *smo, float v_bus, float v_alpha, float v_beta, float i_alpha_meas, float i_beta_meas)
 {
     if (smo == NULL)
     {
@@ -757,16 +789,16 @@ bool SMO_Update(SMO_t *smo, float v_bus, float v_alpha, float v_beta, float i_al
     // Step 4: Back-EMF LPF (TI eq. 13 / 20). Raw EMF = E_hat + z/kappa, so
     // E_hat += a*(raw - E_hat) reduces to E_hat += (a/kappa)*z.
     // wc = ratio*|w| clamped; the lag atan(w/wc) is compensated in step 7.
-    float omega_abs = fabsf(omega);
-    float wc = ESMO_WC_RATIO * omega_abs;
+    // Worked in x = wc*Ts (one multiply by the pre-computed ratio*Ts).
+    float x = smo->esmo_ratio_ts * fabsf(omega);
     float a_lpf; // a/kappa
     float lag;   // LPF phase lag to add back (rad)
-    if (wc <= smo->esmo_wc_lo)
+    if (x <= smo->esmo_x_lo)
     {
         a_lpf = smo->esmo_a_lo;
         lag = Fast_Atan2(omega, smo->esmo_wc_lo);
     }
-    else if (wc >= smo->esmo_wc_hi)
+    else if (x >= ESMO_WC_MAX_TS)
     {
         a_lpf = smo->esmo_a_hi;
         lag = Fast_Atan2(omega, smo->esmo_wc_hi);
@@ -774,7 +806,6 @@ bool SMO_Update(SMO_t *smo, float v_bus, float v_alpha, float v_beta, float i_al
     else
     {
         // a = 1 - exp(-x), x = wc*Ts in (x_lo, 0.7]: 5th-order series, error < 0.05 %
-        float x = wc * Ts;
         a_lpf = x * (1.0f - x * (0.5f - x * (0.16666667f - x * (0.041666667f - x * 0.0083333333f))));
         a_lpf *= smo->esmo_inv_kappa;
         lag = (omega >= 0.0f) ? smo->esmo_lag : -smo->esmo_lag; // atan(1/ratio)
@@ -815,7 +846,7 @@ bool SMO_Update(SMO_t *smo, float v_bus, float v_alpha, float v_beta, float i_al
     float pll_err = (e_beta * cos_t - e_alpha * sin_t) * inv_emf;
 
     float omega_pll = smo->pll.Kp * pll_err + smo->pll.integral;
-    float omega_new = CONSTRAIN(smo->pll.integral + smo->pll.Ki * Ts * pll_err, -ESMO_OMEGA_MAX, ESMO_OMEGA_MAX);
+    float omega_new = CONSTRAIN(smo->pll.integral + smo->pll.Ki_Ts * pll_err, -ESMO_OMEGA_MAX, ESMO_OMEGA_MAX);
     smo->pll.integral = omega_new;
     omega_pll = CONSTRAIN(omega_pll, -ESMO_OMEGA_MAX, ESMO_OMEGA_MAX);
 
@@ -862,11 +893,32 @@ bool SMO_Update(SMO_t *smo, float v_bus, float v_alpha, float v_beta, float i_al
 // ---------------------------------------------------------------------------
 // Function to initialize FOC library
 // Clear the 6x harmonic compensation state (see FOC_Harmonic_Comp)
-static void Harm_Reset(FOC_t *foc)
+FOC_FAST_CODE static void Harm_Reset(FOC_t *foc)
 {
     foc->harm_p[0] = foc->harm_p[1] = 0.0f;
     foc->harm_n[0] = foc->harm_n[1] = 0.0f;
     foc->harm_div = 0;
+}
+
+// Products of configuration values that FOC_Update would otherwise recompute every
+// period. Rerun whenever sampling_time or bldc changes (FOC_Init, FOC_Recalc_Params).
+static void FOC_Precompute(FOC_t *foc)
+{
+    foc->ipark_adv = IPARK_DELAY_COMP * foc->sampling_time;
+    foc->harm_k = HARM_KI * foc->sampling_time;
+
+    // MTPA: id = (psi - sqrt(psi^2 + 8 dL^2 Is^2)) / (4 dL), dL = Lq - Ld
+    float L_diff = foc->bldc.Lq - foc->bldc.Ld;
+    if (L_diff > MIN_SALIENCY_H)
+    {
+        foc->mtpa_k = 8.0f * L_diff * L_diff;
+        foc->mtpa_inv_4l = 1.0f / (4.0f * L_diff);
+    }
+    else
+    {
+        foc->mtpa_k = 0.0f;
+        foc->mtpa_inv_4l = 0.0f; // Non-salient: all current on q
+    }
 }
 
 void FOC_Init(FOC_t *foc, uint32_t pwm_res, uint32_t adc_offset)
@@ -948,13 +1000,15 @@ void FOC_Init(FOC_t *foc, uint32_t pwm_res, uint32_t adc_offset)
 
     // Initialize SMO
     SMO_Init(&(foc->smo), &(foc->bldc), TS);
+
+    FOC_Precompute(foc);
 }
 
 // ---------------------------------------------------------------------------
 // De-energize the bridge and drop out of closed loop.
 // Zeroing the duty registers is what actually stops the motor: the ISR latches
 // pwm_a/b/c into CCR1-3 every period regardless of mode.
-void FOC_Coast(FOC_t *foc)
+FOC_FAST_CODE void FOC_Coast(FOC_t *foc)
 {
     if (foc == NULL)
     {
@@ -992,11 +1046,12 @@ void FOC_Coast(FOC_t *foc)
 }
 
 static void FOC_Speed_Control(FOC_t *foc);
+FOC_INLINE void Current_Loop_Core(FOC_t *foc);
 
 // ---------------------------------------------------------------------------
 // Function to update FOC states
 // This function should be called at the end of each PWM period
-void FOC_Update(FOC_t *foc)
+FOC_FAST_CODE void FOC_Update(FOC_t *foc)
 {
     if (foc == NULL)
     {
@@ -1053,7 +1108,7 @@ void FOC_Update(FOC_t *foc)
             {
                 FOC_Speed_Control(foc);
             }
-            FOC_Current_Loop_Update(foc);
+            Current_Loop_Core(foc);
             break;
 
         default:
@@ -1097,12 +1152,15 @@ void FOC_Update(FOC_t *foc)
     // speed with this motor at 10 kHz), so advance the angle. omega is 0 while
     // aligning, the forced speed during the I-f ramp, and the observer's speed
     // in the transition and in closed loop.
-    float theta_ipark = foc->theta + IPARK_DELAY_COMP * foc->omega * foc->sampling_time;
-    Inverse_Park_Transform(foc->v_d, foc->v_q, theta_ipark, &(foc->v_alpha), &(foc->v_beta));
+    // theta is in [0, 2pi) and the advance is well under one turn (0.3 rad at
+    // ESMO_OMEGA_MAX), so one wrap keeps the transform on its table fast path; without
+    // it, every period near 0 or 2pi took the Normalize_Angle slow path.
+    float theta_ipark = Wrap_Once(foc->theta + foc->ipark_adv * foc->omega);
+    Inverse_Park_Core(foc->v_d, foc->v_q, theta_ipark, &(foc->v_alpha), &(foc->v_beta));
 
     // Space Vector PWM Modulation
-    SVPWM_Modulation(foc->v_alpha, foc->v_beta, foc->v_bus, foc->pwm_resolution,
-                     &(foc->pwm_a), &(foc->pwm_b), &(foc->pwm_c));
+    SVPWM_Core(foc->v_alpha, foc->v_beta, foc->v_bus, foc->pwm_resolution,
+               &(foc->pwm_a), &(foc->pwm_b), &(foc->pwm_c));
 }
 
 // ---------------------------------------------------------------------------
@@ -1123,22 +1181,22 @@ void FOC_Recalc_Params(FOC_t *foc)
 
     // Update SMO BLDC specifications
     SMO_BLDC_Specs_Update(&(foc->smo), &(foc->bldc), foc->sampling_time);
+
+    FOC_Precompute(foc);
 }
 
 // ---------------------------------------------------------------------------
-void FOC_MTPA(FOC_t *foc, float Is, float *Id_ref, float *Iq_ref)
+FOC_FAST_CODE void FOC_MTPA(FOC_t *foc, float Is, float *Id_ref, float *Iq_ref)
 {
     if (foc == NULL || Id_ref == NULL || Iq_ref == NULL)
     {
         return;
     }
 
-    float L_diff = foc->bldc.Lq - foc->bldc.Ld;
-
     // Non-salient (surface-PM) motor, or unusable saliency: no reluctance torque
-    // to exploit, so put all current on the q-axis. Also guards the division
-    // below, since Ld == Lq is the default configuration.
-    if (L_diff <= MIN_SALIENCY_H)
+    // to exploit, so put all current on the q-axis. (FOC_Precompute sets
+    // mtpa_inv_4l to 0 for Lq - Ld <= MIN_SALIENCY_H, the default Ld == Lq.)
+    if (foc->mtpa_inv_4l == 0.0f)
     {
         *Id_ref = 0.0f;
         *Iq_ref = Is;
@@ -1146,8 +1204,8 @@ void FOC_MTPA(FOC_t *foc, float Is, float *Id_ref, float *Iq_ref)
     }
 
     float Is_square = Is * Is;
-    float temp = Fast_Sqrt(FLUX_LINKAGE * FLUX_LINKAGE + 8.0f * (L_diff * L_diff) * Is_square);
-    float id = (FLUX_LINKAGE - temp) / (4.0f * L_diff);
+    float temp = Fast_Sqrt(FLUX_LINKAGE * FLUX_LINKAGE + foc->mtpa_k * Is_square);
+    float id = (FLUX_LINKAGE - temp) * foc->mtpa_inv_4l;
 
     // |id| can marginally exceed |Is| through rounding; clamp so the sqrt stays real
     float iq_square = Is_square - (id * id);
@@ -1163,44 +1221,44 @@ void FOC_MTPA(FOC_t *foc, float Is, float *Id_ref, float *Iq_ref)
 // Update PWM in current controlled loop (Update at the end of PWM Period)
 // d/q current PI control at angle foc->theta (shared by startup and closed loop).
 // Expects foc->i_alpha / i_beta to be up to date (Clarke done by the caller).
-static void FOC_Current_Control(FOC_t *foc)
+FOC_FAST_CODE static void FOC_Current_Control(FOC_t *foc)
 {
     // Limit current references (Current loop control id and iq to the setpoint)
     float id_ref = CONSTRAIN(foc->id_ref, -foc->bldc.max_current, foc->bldc.max_current);
     float iq_ref = CONSTRAIN(foc->iq_ref, -foc->bldc.max_current, foc->bldc.max_current);
 
     // Perform Park transform to get Id and Iq
-    Park_Transform(foc->i_alpha, foc->i_beta, foc->theta, &(foc->i_d), &(foc->i_q));
+    Park_Core(foc->i_alpha, foc->i_beta, foc->theta, &(foc->i_d), &(foc->i_q));
 
     // Set current output limits based on bus voltage to prevent overmodulation
     float v_limit = foc->v_bus * ONE_OVER_SQRT3; // Max phase voltage in the linear range
 
     // Calculate errors and update PI controllers.
     // v_d is the PI output, not an accumulator: the PI already integrates.
-    PI_Set_Output_Limit(&(foc->id_ctrl), v_limit);
-    foc->v_d = PI_Update(&(foc->id_ctrl), id_ref - foc->i_d);
+    foc->id_ctrl.output_limit = v_limit;
+    foc->v_d = PI_Step(&(foc->id_ctrl), id_ref - foc->i_d);
 
     // Give Vq whatever headroom Vd left inside the voltage circle.
     // Guard the argument so |v_d| > v_limit cannot produce a NaN.
     float vq_headroom_sq = v_limit * v_limit - foc->v_d * foc->v_d;
     float vq_limit = (vq_headroom_sq > 0.0f) ? Fast_Sqrt(vq_headroom_sq) : 0.0f;
 
-    PI_Set_Output_Limit(&(foc->iq_ctrl), vq_limit);
-    foc->v_q = PI_Update(&(foc->iq_ctrl), iq_ref - foc->i_q);
+    foc->iq_ctrl.output_limit = vq_limit;
+    foc->v_q = PI_Step(&(foc->iq_ctrl), iq_ref - foc->i_q);
 }
 
 // Unit phasor conj(G_eff)/|G_eff| of the plant seen by a d/q-frame signal at frequency w_dq
 // (signed, rad/s): G = LPF * PWM delay / (R + j*w_s*L) at the stationary frequency
 // w_s = w_dq + omega (the inverse Park advance already covers the frame rotation), and
 // G_eff = G / (1 + C*G) with the d/q PI C = Kp - j*Ki/w_dq already closed around it.
-static void Harm_Phasor(const FOC_t *foc, float w_dq, float out[2])
+FOC_FAST_CODE static void Harm_Phasor(const FOC_t *foc, float w_dq, float out[2])
 {
     const float ts = foc->sampling_time;
     const float w_s = w_dq + foc->omega;
     const float R = foc->bldc.Rs, L = foc->bldc.Ld;
 
-    float den = R * R + w_s * w_s * L * L;
-    float pr = R / den, pi = -w_s * L / den; // 1 / (R + j w_s L)
+    const float inv_den = 1.0f / (R * R + w_s * w_s * L * L);
+    float pr = R * inv_den, pi = -w_s * L * inv_den; // 1 / (R + j w_s L)
 
     // Angles stay within +-2pi up to ESMO_OMEGA_MAX: use |angle| (trig fast path), odd sine
     float a = w_dq * HARM_DELAY_TS * ts;
@@ -1219,8 +1277,9 @@ static void Harm_Phasor(const FOC_t *foc, float w_dq, float out[2])
 
     float cr = foc->iq_ctrl.Kp, ci = -foc->iq_ctrl.Ki / w_dq;
     float lr = 1.0f + cr * g2r - ci * g2i, li = cr * g2i + ci * g2r; // 1 + C G
-    float lm = lr * lr + li * li;
-    float er = (g2r * lr + g2i * li) / lm, ei = (g2i * lr - g2r * li) / lm;
+    // G_eff = G conj(1 + C G) / |1 + C G|^2. Only its direction is used, so the
+    // positive real |1 + C G|^2 is dropped instead of divided out.
+    float er = g2r * lr + g2i * li, ei = g2i * lr - g2r * li;
 
     float m = Fast_Sqrt(er * er + ei * ei);
     if (m < 1e-9f)
@@ -1238,7 +1297,7 @@ static void Harm_Phasor(const FOC_t *foc, float w_dq, float out[2])
 // The current error is rotated into the +6 and -6 frames and integrated there with the
 // phase of conj(G_eff), so each integrator drives its harmonic of the error to zero; the
 // outputs are rotated back and added to v_d / v_q.
-static void FOC_Harmonic_Comp(FOC_t *foc)
+FOC_FAST_CODE static void FOC_Harmonic_Comp(FOC_t *foc)
 {
     if (!HARM_COMP || fabsf(foc->omega) < HARM_OMEGA_MIN)
     {
@@ -1269,7 +1328,7 @@ static void FOC_Harmonic_Comp(FOC_t *foc)
     float s, c;
     Fast_Sin_Cos(th6, &s, &c);
     const float ed = foc->id_ref - foc->i_d, eq = foc->iq_ref - foc->i_q;
-    const float k = HARM_KI * foc->sampling_time;
+    const float k = foc->harm_k;
 
     // +6 frame: e * exp(-j6theta); -6 frame: e * exp(+j6theta)
     float px = ed * c + eq * s, py = eq * c - ed * s;
@@ -1297,13 +1356,9 @@ static void FOC_Harmonic_Comp(FOC_t *foc)
     foc->v_q += foc->harm_p[0] * s + foc->harm_p[1] * c - foc->harm_n[0] * s + foc->harm_n[1] * c;
 }
 
-void FOC_Current_Loop_Update(FOC_t *foc)
+// Closed-loop step, inlined into FOC_Update; FOC_Current_Loop_Update wraps it
+FOC_INLINE void Current_Loop_Core(FOC_t *foc)
 {
-    if (foc == NULL)
-    {
-        return;
-    }
-
     // Refresh the measured currents in the stationary frame BEFORE running the
     // observer, so the SMO sees this period's samples rather than the previous one's.
     Clarke_Transform(foc->i_a, foc->i_b, &(foc->i_alpha), &(foc->i_beta));
@@ -1323,6 +1378,16 @@ void FOC_Current_Loop_Update(FOC_t *foc)
 
     FOC_Current_Control(foc);
     FOC_Harmonic_Comp(foc);
+}
+
+void FOC_Current_Loop_Update(FOC_t *foc)
+{
+    if (foc == NULL)
+    {
+        return;
+    }
+
+    Current_Loop_Core(foc);
 }
 
 // ---------------------------------------------------------------------------
@@ -1360,7 +1425,7 @@ static inline float Wrap_Pm_Pi(float a)
 // rotor_dir), so a single clamp keeps it motoring only: the output and the integrator
 // never go negative, so the drive never brakes and returns no energy to the bus.
 // When speed_ref drops, the motor slows by friction and load.
-static void FOC_Speed_Control(FOC_t *foc)
+FOC_FAST_CODE static void FOC_Speed_Control(FOC_t *foc)
 {
     if (++foc->speed_div < SPEED_CTRL_DIVIDER)
     {
@@ -1371,7 +1436,7 @@ static void FOC_Speed_Control(FOC_t *foc)
     const float dir = (foc->rotor_dir == NORMAL_DIRECTION) ? 1.0f : -1.0f;
     foc->speed_ref_ramp = Slew_To(foc->speed_ref_ramp, foc->speed_ref, SPEED_REF_SLEW * TS_SPEED);
 
-    float iq = PI_Update(&(foc->speed_ctrl), dir * (foc->speed_ref_ramp - foc->smo.omega_est));
+    float iq = PI_Step(&(foc->speed_ctrl), dir * (foc->speed_ref_ramp - foc->smo.omega_est));
     if (iq < 0.0f)
     {
         iq = 0.0f;
@@ -1405,7 +1470,7 @@ static void FOC_Speed_Control(FOC_t *foc)
 //
 // Faults (observer never locks at OMEGA_FORCE, or loses lock during the
 // transition) coast the motor instead of looping back into a restart.
-void FOC_BLDC_Startup_Update(FOC_t *foc)
+FOC_FAST_CODE void FOC_BLDC_Startup_Update(FOC_t *foc)
 {
     if (foc == NULL)
     {
@@ -1713,7 +1778,7 @@ void FOC_BLDC_Parameter_Calculation_Inductance(FOC_t *foc)
 
 // ---------------------------------------------------------------------------
 // Measurement of BLDC parameters using pre-defined signal injection
-void FOC_BLDC_Parameter_Measurement_Update(FOC_t *foc)
+FOC_FAST_CODE void FOC_BLDC_Parameter_Measurement_Update(FOC_t *foc)
 {
     if (foc == NULL)
     {

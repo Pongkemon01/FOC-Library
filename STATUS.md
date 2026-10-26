@@ -5,6 +5,70 @@ Git history starts on 2026-10-26; this file holds the record before that and the
 status of each change (compile / sim / hardware). Newest first below; older sections are
 history (marked superseded where they no longer apply).
 
+## 2026-10-27: lean ADC interrupt path
+
+- `ADC1_2_IRQHandler` (USER CODE 0 in `Src/stm32f3xx_it.c`) first calls `ADC_IRQ_Fast_Dispatch()`
+  (`Src/freertos.c`, CCM): on ADC1 JEOS with JEOSIE set it clears JEOC/JEOS, calls the callback
+  and returns, skipping both `HAL_ADC_IRQHandler` calls (ADC2 is initialised but never started).
+  Anything else falls through to HAL as before. Not done: HAL's `HAL_ADC_STATE_INJ_EOC` state bit
+  (nothing reads it). `-DADC_IRQ_FAST_DISPATCH=0` restores the HAL dispatch (A/B timing).
+- Callback: `ADC1->JDR1..4` instead of `HAL_ADCEx_InjectedGetValue`, `GPIOC->BSRR` instead of
+  `HAL_GPIO_WritePin` (PC8 pulse kept, same span). No flash veneers left inside the callback.
+- New timing column `irq_cyc` (and an end-of-run max): from `ADC1_2_IRQHandler` entry to the end
+  of the callback (excludes only exception entry and, with HAL dispatch, HAL's work after the
+  callback). `isr_cyc` keeps its meaning (callback only).
+- Bench (standard profile, fast dispatch twice, HAL dispatch once as A/B):
+  callback `isr_cyc` running median 1338 → 1208, max 1684 → 1554; Align 766 → 636.
+  `irq_cyc` running median 1262 / max 1608 with fast dispatch vs 1331 / 1677 with HAL dispatch
+  (dispatch 54 vs 123 cycles before the callback, plus HAL's unmeasured post-callback work).
+  Holds 1500 / 2500 rad/s el within ±1 rad/s, lock never dropped, no break. Hardware-verified.
+
+## 2026-10-27: FOC_Update call tree runs from CCM SRAM
+
+- `FOC_FAST_CODE` (foc_lib.h) puts a function in section `.ccmram.text` when built with
+  `-DFOC_CCMRAM_CODE` (now in `platformio.ini`; host sims build without it). Tagged: the ADC
+  callback in `Src/freertos.c`, `FOC_Update` and everything it calls (startup, current loop,
+  harmonic comp, `SMO_Update`, MTPA, coast, calibration update, trig/atan2/sqrt, Park slow
+  paths, `Normalize_Angle`, `PI_Reset`, `Park_Transform`). 8.1 KB of the 16 KB CCM.
+- The stock linker script already maps `*(.ccmram*)` to CCMRAM with a flash load address
+  (`_siccmram`, `_sccmram`, `_eccmram`), but the startup file copies only `.data`: `main()`
+  (USER CODE 1) copies the section, then DSB/ISB, before `HAL_Init`. The PlatformIO Flash/RAM
+  summary does not count `.ccmram` (check with `arm-none-eabi-size -A`).
+- `trig_table` stays in main SRAM (no I-bus/D-bus contention on CCM).
+- Remaining flash calls on the per-period path, via long-branch veneers: the HAL IRQ handler
+  into the callback, `HAL_ADCEx_InjectedGetValue` ×4 and `HAL_GPIO_WritePin` ×2 (IRQ-path
+  follow-up).
+- Verification: `pio run` OK; sims unchanged. Bench (standard profile): ISR cycles Align
+  1051 → 766, I-f 1809 → 1275, transition 1705 → 1213, running median 1844 → 1338, run max
+  2267 → 1684 (of 3600). Holds 1500 / 2500 rad/s el within ±1 rad/s, lock never dropped, no
+  break, calibration Rs 0.022794. Hardware-verified for this profile.
+
+## 2026-10-27: FOC_Update speed-up (precomputed constants, inlined hot path)
+
+- Precomputed instead of per period: `PI_Controller_t.Ki_Ts` / `Kb_Ts` (in `PI_Change_Params`;
+  also the eSMO PLL), `FOC_t.ipark_adv` (IPARK_DELAY_COMP·Ts), `harm_k` (HARM_KI·Ts),
+  `mtpa_k` / `mtpa_inv_4l` (MTPA, no division), `SMO_t.esmo_ratio_ts` / `esmo_x_lo` (LPF
+  branch in the wc·Ts domain), `ADC_2_CURRENT` with the current LPF alpha folded in (one
+  multiply + one FMA per phase). `FOC_Precompute()` refreshes the FOC fields from `FOC_Init`
+  and `FOC_Recalc_Params`; `SMO_BLDC_Specs_Update` refreshes the PLL's `Ki_Ts`.
+- Inverse-Park angle is wrapped once before the transform: the advance used to push it past
+  2π (or below 0) for a few % of periods, which took the noinline `Normalize_Angle` path.
+- Inlined into `FOC_Update` (`FOC_INLINE` = always_inline): PI step, Park, inverse Park, SVPWM,
+  closed-loop step. The public functions remain as wrappers (the sims use them).
+- `Harm_Phasor`: 7 → 4 divisions (one reciprocal of the RL denominator; the positive
+  |1+CG|² scale is dropped because only the phasor direction is used).
+- Verification: `pio run` OK (RAM 55148 B, Flash 56928 B). All `tools/sim` programs give
+  output identical to before at their printed precision. Bench, two runs of the standard
+  profile: ISR cycles Align 1133 → 1051, I-f 1907 → 1809, transition 1796 → 1705, running
+  median 1954 → 1844, run max 2546 → 2267 (of 3600). Holds 1500 / 2500 rad/s el within
+  ±1–3 rad/s, lock never dropped, no break; i_d means within the 50 Hz log's sampling spread.
+  Hardware-verified for this profile.
+- Not done (outside `FOC_Update`, proposed): executing the hot path from CCM SRAM (0 wait
+  states vs 2 for flash); trimming the HAL IRQ path (`HAL_ADC_IRQHandler` called twice by
+  `ADC1_2_IRQHandler`, 4 `HAL_ADCEx_InjectedGetValue` calls, `HAL_GPIO_WritePin`), which
+  `isr_cyc` does not even include. Calibration's `Fast_Sin` of a growing angle (slow path every
+  period) is left as is.
+
 ## 2026-10-27: legacy SMO removed, eSMO is the only observer
 
 - Removed the legacy `SMO_Update` (MathWorks-style SMO), `SMO_Sign`, the `SMO_USE_ESMO`

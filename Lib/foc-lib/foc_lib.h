@@ -4,6 +4,17 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+// Placement of the time-critical code (FOC_Update's call tree). Build with
+// -DFOC_CCMRAM_CODE to run it from the STM32F3 CCM SRAM at 0 wait states (flash has 2 at
+// 72 MHz). The section .ccmram is in the stock linker script (loaded from flash), but the
+// startup code does not copy it: the application must copy _siccmram -> _sccmram.._eccmram
+// before anything calls these functions (main.c does, first thing in main()).
+#if defined(FOC_CCMRAM_CODE) && defined(__GNUC__)
+#define FOC_FAST_CODE __attribute__((section(".ccmram.text")))
+#else
+#define FOC_FAST_CODE
+#endif
+
 // ============================================================================
 // Constants
 // ============================================================================
@@ -52,6 +63,7 @@
 #define CURRENT_SENSE_POLARITY (-1.0f)
 #define V_2_CURRENT (CURRENT_SENSE_POLARITY / (V_GAIN * R_SHUNT))   // Voltage to current conversion factor (A/V)
 #define ADC_2_VBUS (ADC_2_VOLT / V_BUS_GAIN)                        // ADC to bus voltage conversion factor (V)
+#define ADC_2_CURRENT (ADC_2_VOLT * V_2_CURRENT)                    // ADC counts to current (A), folded at compile time
 
 // Default parameters for startup: Align -> I-f ramp -> Transition -> Run
 // All stages are current-controlled (the current PI loops run throughout), as in
@@ -244,6 +256,8 @@ typedef struct
     float Ki;
     float Kb; // Anti-windup back-calculation gain Kt = Ki/Kp = 1/Ti (1/s)
     float Ts; // Sampling time
+    float Ki_Ts; // Ki * Ts (pre-computed in PI_Change_Params)
+    float Kb_Ts; // min(Kb * Ts, 1) (pre-computed in PI_Change_Params)
     float integral;
     float output_limit; // Symmetric output clamp; negative means unlimited
 } PI_Controller_t;
@@ -283,6 +297,8 @@ typedef struct
     float esmo_z_gain;    // lambda/G: linear sliding gain inside the boundary layer (V/A)
     float esmo_inv_kappa; // (1 - F + lambda)/lambda: restores unity EMF gain
     float esmo_dL;        // Ld - Lq (H), extended-EMF cross-coupling
+    float esmo_ratio_ts;  // ESMO_WC_RATIO * Ts: wc*Ts per rad/s of |omega|
+    float esmo_x_lo;      // esmo_wc_lo * Ts
     float esmo_wc_lo;     // LPF cutoff floor (rad/s)
     float esmo_wc_hi;     // LPF cutoff ceiling (rad/s)
     float esmo_a_lo;      // LPF coefficient at the floor, already divided by kappa
@@ -316,6 +332,12 @@ typedef struct
     // Configuration parameters
     float sampling_time;
     uint16_t pwm_resolution; // Max PWM count value
+
+    // Pre-computed from the configuration (FOC_Init / FOC_Recalc_Params)
+    float ipark_adv;   // IPARK_DELAY_COMP * Ts (s)
+    float harm_k;      // HARM_KI * Ts
+    float mtpa_k;      // 8 * (Lq - Ld)^2, MTPA
+    float mtpa_inv_4l; // 1 / (4 * (Lq - Ld)), 0 for a non-salient motor (MTPA: id = 0)
 
     // DC offset voltage for current sensing
     uint16_t adc_offset_a;

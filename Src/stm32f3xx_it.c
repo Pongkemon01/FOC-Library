@@ -61,7 +61,13 @@ extern TIM_HandleTypeDef htim1;
 extern TIM_HandleTypeDef htim17;
 
 /* USER CODE BEGIN EV */
-
+// Control-interrupt fast path and its timing stamp (Src/freertos.c)
+#include <stdbool.h>
+#ifndef ADC_IRQ_FAST_DISPATCH
+#define ADC_IRQ_FAST_DISPATCH 1 // 0: always dispatch through HAL_ADC_IRQHandler (A/B timing)
+#endif
+extern volatile uint32_t irq_cyc0;
+bool ADC_IRQ_Fast_Dispatch(void);
 /* USER CODE END EV */
 
 /******************************************************************************/
@@ -168,7 +174,14 @@ void DebugMon_Handler(void)
 void ADC1_2_IRQHandler(void)
 {
   /* USER CODE BEGIN ADC1_2_IRQn 0 */
-
+  irq_cyc0 = DWT->CYCCNT;
+#if ADC_IRQ_FAST_DISPATCH
+  // ADC1 end of injected sequence (the FOC control interrupt) skips both HAL handlers below
+  if (ADC_IRQ_Fast_Dispatch())
+  {
+    return;
+  }
+#endif
   /* USER CODE END ADC1_2_IRQn 0 */
   HAL_ADC_IRQHandler(&hadc1);
   HAL_ADC_IRQHandler(&hadc2);

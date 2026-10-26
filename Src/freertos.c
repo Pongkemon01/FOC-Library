@@ -58,6 +58,10 @@ FOC_t foc;
 // ADC-callback execution time in CPU cycles (DWT cycle counter, 72 MHz), excluding the HAL IRQ
 // handler and exception entry. Budget: 72e6 / PWM_FREQ cycles per period.
 static volatile uint32_t isr_cyc_last, isr_cyc_max;
+// Same, but from ADC1_2_IRQHandler entry (stamped there into irq_cyc0) to the end of the
+// callback: also covers the interrupt dispatch. Excludes only the exception entry itself.
+volatile uint32_t irq_cyc0;
+static volatile uint32_t irq_cyc_last, irq_cyc_max;
 /* USER CODE END Variables */
 /* Definitions for defaultTask */
 osThreadId_t defaultTaskHandle;
@@ -451,7 +455,8 @@ void StartDefaultTask(void *argument)
     TIM1->SR = ~TIM_SR_BIF; // Clear a stale break flag (rc_w0)
     const uint32_t t0 = osKernelGetTickCount();
     isr_cyc_max = 0;
-    printf("t_ms mode w_force w_ref w_est emf_mV lock cnt id_mA iq_mA ia_mA ib_mA vd_mV vq_mV vbus_mV brk moe isr_cyc\r\n");
+    irq_cyc_max = 0;
+    printf("t_ms mode w_force w_ref w_est emf_mV lock cnt id_mA iq_mA ia_mA ib_mA vd_mV vq_mV vbus_mV brk moe isr_cyc irq_cyc\r\n");
     BLDC_Mode_t last_mode = foc.motor_mode;
     for (int k = 0; k < 250; k++)
     {
@@ -464,17 +469,19 @@ void StartDefaultTask(void *argument)
             printf("*** Startup complete: handover to closed loop at speed %f rad/s, id = %f A, iq = %f A\r\n",
                    foc.omega, foc.id_ref, foc.iq_ref);
         last_mode = foc.motor_mode;
-        printf("%d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\r\n",
+        printf("%d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\r\n",
                (int)t_ms, (int)foc.motor_mode, (int)foc.startup_omega,
                (int)foc.speed_ref_ramp, (int)foc.smo.omega_est, (int)(foc.smo.emf_magnitude * 1000.0f), (int)foc.smo.locked,
                (int)foc.bemf_counter, (int)(foc.i_d * 1000.0f), (int)(foc.i_q * 1000.0f),
                (int)(foc.i_a * 1000.0f), (int)(foc.i_b * 1000.0f),
                (int)(foc.v_d * 1000.0f), (int)(foc.v_q * 1000.0f), (int)(foc.v_bus * 1000.0f),
-               (TIM1->SR & TIM_SR_BIF) ? 1 : 0, (TIM1->BDTR & TIM_BDTR_MOE) ? 1 : 0, (int)isr_cyc_last);
+               (TIM1->SR & TIM_SR_BIF) ? 1 : 0, (TIM1->BDTR & TIM_BDTR_MOE) ? 1 : 0, (int)isr_cyc_last,
+               (int)irq_cyc_last);
         osDelay(20);
     }
     printf("ISR cycles: max %lu, budget %lu per period (%d Hz PWM)\r\n", (unsigned long)isr_cyc_max,
            (unsigned long)(SystemCoreClock / (uint32_t)PWM_FREQ), (int)PWM_FREQ);
+    printf("IRQ cycles (handler entry to callback end): max %lu\r\n", (unsigned long)irq_cyc_max);
     printf("Stopping FOC control... (vbus_fault = %d)\r\n", (int)foc.vbus_fault);
     foc.foc_mode = FOC_IDLE;
     // Coast check: the rotor is still spinning down here; ia/ib must stay ~0 with moe = 0
@@ -506,20 +513,21 @@ void StartDefaultTask(void *argument)
 
 // -----------------------------------------------------------
 // Callback function for ADC injected conversion complete
-void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc)
+// (FOC_FAST_CODE: runs from CCM SRAM with FOC_Update when built with -DFOC_CCMRAM_CODE)
+FOC_FAST_CODE void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc)
 {
     // Toggle LED
     if (hadc->Instance == ADC1) // Current sensor phase U
     {
         const uint32_t cyc0 = DWT->CYCCNT;
-        HAL_GPIO_WritePin(GPIOC, GPIO_PIN_8, GPIO_PIN_SET);
+        GPIOC->BSRR = GPIO_PIN_8; // PC8 high for the callback's duration (scope timing)
         // HAL_GPIO_TogglePin(LED_RED_GPIO_Port, LED_RED_Pin);
-        //  Measure ADC values for phase currents and bus voltage
-        foc.adc_v_a = HAL_ADCEx_InjectedGetValue(hadc, ADC_INJECTED_RANK_1);
-        // foc.adc_v_a = ADC1->JDR1;
-        foc.adc_v_b = HAL_ADCEx_InjectedGetValue(hadc, ADC_INJECTED_RANK_2);
-        foc.adc_v_c = HAL_ADCEx_InjectedGetValue(hadc, ADC_INJECTED_RANK_3);
-        foc.adc_v_bus = HAL_ADCEx_InjectedGetValue(hadc, ADC_INJECTED_RANK_4);
+        //  Measure ADC values for phase currents and bus voltage: injected ranks 1-4 are
+        //  JDR1-4 (what HAL_ADCEx_InjectedGetValue returns, without the call and switch)
+        foc.adc_v_a = ADC1->JDR1;
+        foc.adc_v_b = ADC1->JDR2;
+        foc.adc_v_c = ADC1->JDR3;
+        foc.adc_v_bus = ADC1->JDR4;
 
         // Call FOC control algorithm
         FOC_Update(&foc);
@@ -538,11 +546,34 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc)
             Bridge_Outputs(false);
         outputs_were_enabled = foc.outputs_enabled;
 
-        HAL_GPIO_WritePin(GPIOC, GPIO_PIN_8, GPIO_PIN_RESET);
-        isr_cyc_last = DWT->CYCCNT - cyc0;
+        GPIOC->BSRR = (uint32_t)GPIO_PIN_8 << 16; // PC8 low
+        const uint32_t cyc1 = DWT->CYCCNT;
+        isr_cyc_last = cyc1 - cyc0;
         if (isr_cyc_last > isr_cyc_max)
             isr_cyc_max = isr_cyc_last;
+        irq_cyc_last = cyc1 - irq_cyc0;
+        if (irq_cyc_last > irq_cyc_max)
+            irq_cyc_max = irq_cyc_last;
     }
+}
+
+// Fast dispatch of the control interrupt, called first by ADC1_2_IRQHandler. The only ADC
+// interrupt in use is ADC1's end of injected sequence (JEOS, TIM1 CC4 trigger), which this
+// serves without HAL_ADC_IRQHandler; stm32f3xx_it.c calls that for ADC1 and for ADC2 (never
+// started) and it scans every flag. For JEOS with an external trigger, HAL would only set the
+// INJ_EOC state bit (nothing reads it), call the callback and clear JEOC/JEOS.
+// Returns false for anything else, which then goes through the HAL handlers as before.
+FOC_FAST_CODE bool ADC_IRQ_Fast_Dispatch(void)
+{
+    if ((ADC1->ISR & ADC_ISR_JEOS) == 0 || (ADC1->IER & ADC_IER_JEOSIE) == 0)
+    {
+        return false;
+    }
+    // rc_w1. Cleared before the callback so the write has landed long before the exception
+    // returns (a late clear can re-pend the interrupt).
+    ADC1->ISR = ADC_ISR_JEOC | ADC_ISR_JEOS;
+    HAL_ADCEx_InjectedConvCpltCallback(&hadc1);
+    return true;
 }
 
 /* USER CODE END Application */
