@@ -20,8 +20,12 @@ history (marked superseded where they no longer apply).
 - `tools/sim/esmo_sim` lost its two legacy cases.
 - Verification: `pio run` OK (RAM 55092 B / 84.1 %, Flash 56296 B). Sim: `esmo_sim`,
   `speed_sim` and five `startup_sim` cases print output byte-identical to the previous commit
-  (except the coefficient line). Not re-run on hardware (ISR timing not re-measured; the call is
-  now direct instead of through a pointer).
+  (except the coefficient line).
+- Bench run 2026-10-27 (flashed and captured by Claude at the user's request, standard
+  `RUN_FOC_TEST 1` profile, Vbus 11.3 V): Rs 0.022748 ohm, Ld/Lq signs (−,−), handover at
+  1180 rad/s el; holds 1500 → 1499.4 (1499–1500) and 2500 → 2499.5 (2499–2500) rad/s el,
+  i_d mean 44 / −26 mA, lock never dropped, no break, clean coast. ISR max 2546 of 3600 cycles
+  (unchanged from before). Hardware-verified for this profile.
 
 ## Hand-off: state at 2026-10-26 (all hardware-verified on the bench unless noted)
 
