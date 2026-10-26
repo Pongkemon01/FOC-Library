@@ -513,7 +513,7 @@ void StartDefaultTask(void *argument)
 
 // -----------------------------------------------------------
 // Callback function for ADC injected conversion complete
-// (FOC_FAST_CODE: runs from CCM SRAM with FOC_Update when built with -DFOC_CCMRAM_CODE)
+// (FOC_FAST_CODE: runs from CCM SRAM with FOC_Update with this port's Inc/foc_lib_conf.h)
 FOC_FAST_CODE void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc)
 {
     // Toggle LED

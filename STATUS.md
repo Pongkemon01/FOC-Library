@@ -5,6 +5,27 @@ Git history starts on 2026-10-26; this file holds the record before that and the
 status of each change (compile / sim / hardware). Newest first below; older sections are
 history (marked superseded where they no longer apply).
 
+## 2026-10-27: board and motor constants overridable by the port
+
+- `#ifndef` guards in `foc_lib.h` on `PWM_RES`, `ADC_RES`, `ADC_V_REF`, `RS`, `LS`, `POLE_PAIRS`,
+  `FLUX_LINKAGE`, `V_RATED`, `I_RATED`, `I_PEAK`, `R_SHUNT`, `V_OFFSET`, `V_GAIN`, `V_BUS_GAIN`,
+  `CURRENT_SENSE_POLARITY`, `V_BUS_MIN`, `V_BUS_MAX` (`PWM_FREQ` and the startup tunables already
+  had them). A port defines them in `foc_lib_conf.h` or with `-D`; derived constants follow.
+  Controller gains and calibration settings remain fixed in the header.
+- This port keeps the defaults (no overrides in `Inc/foc_lib_conf.h`).
+- Verification: firmware disassembly identical to the bench-verified build; sims unchanged; a host
+  test overriding `POLE_PAIRS`, `R_SHUNT`, `CURRENT_SENSE_POLARITY`, `V_BUS_MAX` (conf header) and
+  `RS` (`-D`) compiled `foc_lib.c` without warnings and picked up every value.
+
+## 2026-10-27: code placement is a port hook, not STM32F3-specific
+
+- `foc_lib.h` no longer names the STM32F3 CCM section. `FOC_FAST_CODE` defaults to nothing;
+  with `-DFOC_LIB_USE_CONF` the library includes the port's `foc_lib_conf.h`, which may define
+  it. This port's `Inc/foc_lib_conf.h` keeps the CCM placement (`.ccmram.text`); `platformio.ini`
+  passes `-DFOC_LIB_USE_CONF` instead of `-DFOC_CCMRAM_CODE`.
+- Verification: `pio run` gives machine code identical to the bench-verified build of the lean
+  IRQ path below (same disassembly); sims unchanged. No new bench run needed.
+
 ## 2026-10-27: lean ADC interrupt path
 
 - `ADC1_2_IRQHandler` (USER CODE 0 in `Src/stm32f3xx_it.c`) first calls `ADC_IRQ_Fast_Dispatch()`
@@ -26,7 +47,7 @@ history (marked superseded where they no longer apply).
 ## 2026-10-27: FOC_Update call tree runs from CCM SRAM
 
 - `FOC_FAST_CODE` (foc_lib.h) puts a function in section `.ccmram.text` when built with
-  `-DFOC_CCMRAM_CODE` (now in `platformio.ini`; host sims build without it). Tagged: the ADC
+  `-DFOC_CCMRAM_CODE` (superseded the same day by `-DFOC_LIB_USE_CONF` + `Inc/foc_lib_conf.h`, see above; host sims build without it). Tagged: the ADC
   callback in `Src/freertos.c`, `FOC_Update` and everything it calls (startup, current loop,
   harmonic comp, `SMO_Update`, MTPA, coast, calibration update, trig/atan2/sqrt, Park slow
   paths, `Normalize_Angle`, `PI_Reset`, `Park_Transform`). 8.1 KB of the 16 KB CCM.

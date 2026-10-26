@@ -36,7 +36,8 @@ pio device monitor               # serial console: monitor_speed/monitor_port ar
 - `-Wl,-u,_printf_float` in `platformio.ini` is required for `%f` in `printf`. Removing it silently breaks float printing.
 - `-D__PLATFORMIO__` selects the `_write()` retarget in `Src/freertos.c` (prints over USART2, 230400 bps). The non-PIO branch is dead code here.
 - `platformio.ini`: `build_flags` set `-O2`, `-DFW_VERSION=1` and the FreeRTOS include paths; `build_unflags = -Os` removes PlatformIO's release default so `-O2` is the only optimisation level (applies to `Lib/foc-lib` too). The `[platformio]` section sets `include_dir = Inc`, `src_dir = Src`. `-DCFG_TUSB_MCU=OPT_MCU_STM32F3` is a TinyUSB leftover from the upstream project (unused here, harmless).
-- `-DFOC_CCMRAM_CODE` runs the ISR call tree (functions tagged `FOC_FAST_CODE`) from CCM SRAM, ~27 % faster than flash. It relies on the `.ccmram` copy loop in `main()` (USER CODE 1). Tag any new function called from `FOC_Update`, or every call to it goes through a long-branch veneer into flash.
+- `-DFOC_LIB_USE_CONF` makes `foc_lib.h` include the port header `Inc/foc_lib_conf.h`, which defines `FOC_FAST_CODE` to place the ISR call tree in CCM SRAM (~27 % faster than flash). It relies on the `.ccmram` copy loop in `main()` (USER CODE 1). Tag any new function called from `FOC_Update` with `FOC_FAST_CODE`, or every call to it goes through a long-branch veneer into flash.
+- **foc-lib stays platform-neutral**: no MCU, HAL or linker specifics in `Lib/foc-lib`. Any platform's PWM ISR feeds `adc_v_*`, calls `FOC_Update()` and applies `pwm_a/b/c` and `outputs_enabled`. Platform tuning goes in the port's `foc_lib_conf.h`. Without the flag, `FOC_FAST_CODE` expands to nothing (the host sims build this way).
 - **Never add `-ffast-math`**: it lets the compiler delete the NaN/inf guards (`Normalize_Angle`, eSMO reset guard). Use `-O2` (or `-O3`) for `foc_lib.c`; `-Os` makes Park/eSMO markedly slower.
 
 ## CubeMX-generated code — the #1 footgun
@@ -68,7 +69,7 @@ RAM was **~89 % (58 KB / 64 KB)** before the 2026-10 rework; the trig table shra
 ## Conventions
 
 - `Lib/` holds the reusable `foc-lib` (PlatformIO auto-discovers it). `shared/` is referenced in `platformio.ini` (`build_src_filter`, `-I shared`) but does not exist; harmless today, relevant if you add shared code.
-- Tunables (motor params, gains, ADC scaling, rated values) are `#define`s in `Lib/foc-lib/foc_lib.h`. Startup tunables are `#ifndef`-guarded and can be overridden from `platformio.ini` `build_flags` (e.g. `-DOMEGA_FORCE=500.0f`); motor constants are not.
+- Tunables (motor params, gains, ADC scaling, rated values) are `#define`s in `Lib/foc-lib/foc_lib.h`. Startup tunables and the board/sensing/motor constants (`PWM_RES`, `ADC_RES`, `ADC_V_REF`, `R_SHUNT`, `V_OFFSET`, `V_GAIN`, `V_BUS_GAIN`, `CURRENT_SENSE_POLARITY`, `RS`, `LS`, `POLE_PAIRS`, `FLUX_LINKAGE`, `V_RATED`, `I_RATED`, `I_PEAK`, `V_BUS_MIN`, `V_BUS_MAX`) are `#ifndef`-guarded defaults for the reference setup. A port overrides them in its `foc_lib_conf.h` or with `-D` (e.g. `-DOMEGA_FORCE=500.0f`); derived constants (`TS`, `ADC_2_*`, `V_2_CURRENT`, `ADC_OFFSET`) follow automatically. Controller gains and calibration settings are not guarded.
 - Units: angles in electrical radians, speeds in electrical rad/s unless a name says otherwise.
 - `.vscode/c_cpp_properties.json` and `.vscode/launch.json` are auto-generated — do not hand-edit; change `platformio.ini` instead.
 - `tools/sim/` holds host-side simulations of the library (not built by PlatformIO).

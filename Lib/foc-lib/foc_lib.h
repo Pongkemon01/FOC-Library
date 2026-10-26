@@ -4,15 +4,18 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-// Placement of the time-critical code (FOC_Update's call tree). Build with
-// -DFOC_CCMRAM_CODE to run it from the STM32F3 CCM SRAM at 0 wait states (flash has 2 at
-// 72 MHz). The section .ccmram is in the stock linker script (loaded from flash), but the
-// startup code does not copy it: the application must copy _siccmram -> _sccmram.._eccmram
-// before anything calls these functions (main.c does, first thing in main()).
-#if defined(FOC_CCMRAM_CODE) && defined(__GNUC__)
-#define FOC_FAST_CODE __attribute__((section(".ccmram.text")))
-#else
-#define FOC_FAST_CODE
+// Optional port configuration. Build with -DFOC_LIB_USE_CONF to include "foc_lib_conf.h"
+// (from the application's include path) before the defaults below. A port may define:
+//   FOC_FAST_CODE  Attribute placing the per-period code (FOC_Update's call tree) in the
+//                  platform's fastest code memory, e.g. a RAM section on an MCU that runs
+//                  flash with wait states. The port must then also load that section
+//                  before the PWM ISR first calls FOC_Update.
+#ifdef FOC_LIB_USE_CONF
+#include "foc_lib_conf.h"
+#endif
+
+#ifndef FOC_FAST_CODE
+#define FOC_FAST_CODE // Default: ordinary code placement
 #endif
 
 // ============================================================================
@@ -26,41 +29,76 @@
 #define SQRT3_OVER_2 0.86602540378f  // sqrt(3) / 2
 
 // ---------------------------------------------------------------------------
+// Board, sensing and motor parameters. Each is a default for the reference setup
+// (Nucleo-F303RE + X-NUCLEO-IHM08M1 + Turnigy Aerodrive SK3 3542-1250KV). A port overrides
+// any of them by defining it first, in its foc_lib_conf.h (see FOC_LIB_USE_CONF above) or
+// with -D. The derived constants below them (TS, ADC_2_*, V_2_CURRENT, ADC_OFFSET) follow.
+
 // System default parameters
 #ifndef PWM_FREQ
 #define PWM_FREQ 20000.0f                       // Sampling frequency (Hz) (aka. PWM frequency). 20 kHz since
                                                 // 2026-10-26 (ISR ~2000 of 3600 cycles); was 10 kHz
 #endif
 #define TS (1.0f / PWM_FREQ)                    // Sampling period (s)
+#ifndef PWM_RES
 #define PWM_RES 28799                           // Maximum PWM value (abs. max = 65535)
+#endif
+#ifndef ADC_RES
 #define ADC_RES 4095                            // ADC resolution
+#endif
+#ifndef ADC_V_REF
 #define ADC_V_REF 3.3f                          // ADC reference voltage (V)
+#endif
 #define ADC_2_VOLT (ADC_V_REF / (float)ADC_RES) // ADC to voltage conversion factor
 
 // Default motor electrical parameters: Turnigy Aerodrive SK3 3542-1250KV
 // (spec: 1250 KV, Ri 0.022 ohm, 3-4S, 50-54 A max, ~760 W; pole count not published)
+#ifndef RS
 #define RS 0.022f                    // Stator resistance (Ω): spec Ri; bench calibration 0.0227 (2026-10-26)
+#endif
+#ifndef LS
 #define LS 0.000007f                 // Stator inductance (H) - assume Ld ≈ Lq. Not in spec: bench calibration
                                      // Ld 6.7 / Lq 8.1 uH (calib_sim bias depends on R/L: 5.9 uH read for 7 uH)
+#endif
+#ifndef POLE_PAIRS
 #define POLE_PAIRS 7                 // Number of pole pairs (14 magnets assumed, typical for SK3 35xx: count to confirm)
+#endif
+#ifndef FLUX_LINKAGE
 #define FLUX_LINKAGE 0.000630f       // Flux linkage (Wb) = 60 / (sqrt(3) * 2*pi * KV * POLE_PAIRS), KV = 1250
                                      // Re-derive if POLE_PAIRS changes (6 pp -> 0.000735)
+#endif
 
 // Default motor ratings
+#ifndef V_RATED
 #define V_RATED 14.8f       // Rated voltage (V): motor spec 3-4S = 11.1-14.8 V (bench supply ~11.4 V)
+#endif
+#ifndef I_RATED
 #define I_RATED 15.0f        // Rated current (A): IHM08M1 limit (15 A rms); motor spec 50-54 A max
+#endif
+#ifndef I_PEAK
 #define I_PEAK 30.0f         // Peak current (A): just inside the ~+-31 A sense range (1.65 V / (V_GAIN * R_SHUNT))
+#endif
 
 // Default motor controller parameters
+#ifndef R_SHUNT
 #define R_SHUNT 0.01f                                               // Shunt resistor value (Ω)
+#endif
+#ifndef V_OFFSET
 #define V_OFFSET 1.71f                                              // ADC voltage offset (V)
+#endif
+#ifndef V_GAIN
 #define V_GAIN 5.18f                                                // Gain of the voltage sensing circuit (V/V)
+#endif
+#ifndef V_BUS_GAIN
 #define V_BUS_GAIN 0.0522f                                          // Gain of the bus voltage sensing circuit (V/V)
+#endif
 #define ADC_OFFSET ((int)((V_OFFSET / (float)ADC_V_REF) * ADC_RES)) // ADC value when current = 0
 // Sign of the ADC reading for current flowing INTO the motor phase. X-NUCLEO-IHM08M1 low-side
 // shunts read below the offset for positive phase current (bench-verified 2026-10-26: +v_d gave
 // i_a < 0 before this was -1), so -1 here. Set +1 for a non-inverting sense chain.
+#ifndef CURRENT_SENSE_POLARITY
 #define CURRENT_SENSE_POLARITY (-1.0f)
+#endif
 #define V_2_CURRENT (CURRENT_SENSE_POLARITY / (V_GAIN * R_SHUNT))   // Voltage to current conversion factor (A/V)
 #define ADC_2_VBUS (ADC_2_VOLT / V_BUS_GAIN)                        // ADC to bus voltage conversion factor (V)
 #define ADC_2_CURRENT (ADC_2_VOLT * V_2_CURRENT)                    // ADC counts to current (A), folded at compile time
@@ -197,9 +235,13 @@
 #define KP_SPEED (SPEED_CTRL_BANDWIDTH / SPEED_PLANT_GAIN)                 // Speed controller proportional gain (A per rad/s el)
 #define KI_SPEED (KP_SPEED * SPEED_CTRL_BANDWIDTH * 0.25f)                 // Speed controller integral gain (PI zero at bandwidth/4)
 #define SPEED_REF_SLEW 2000.0f                                             // Speed reference ramp (rad/s^2 el)
+#ifndef V_BUS_MIN
 #define V_BUS_MIN 8.0f                                                     // Minimum bus voltage to calibrate or start (V): supply off/low
+#endif
 #define CAL_PARAM_TOL 4.0f                                                 // Calibrated Rs/Ld/Lq accepted within RS,LS / tol .. * tol
+#ifndef V_BUS_MAX
 #define V_BUS_MAX 18.0f                                                   // Bus over-voltage trip (V): coast. Above a full 4S pack (16.8 V)
+#endif
 
 // ============================================================================
 // Enumerations
