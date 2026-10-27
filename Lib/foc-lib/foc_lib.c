@@ -1005,6 +1005,27 @@ void FOC_Init(FOC_t *foc, uint32_t pwm_res, uint32_t adc_offset)
 }
 
 // ---------------------------------------------------------------------------
+// Select the rotation direction for the next start. speed_ref and is_ref are relative to
+// it (positive = in this direction). Only accepted while the bridge is off (idle, coasted
+// or faulted), because the drive is motoring only and cannot brake a spinning rotor to
+// reverse it: to reverse, stop (FOC_Coast or foc_mode = FOC_IDLE), set, start again.
+// Returns false, leaving the direction unchanged, if the bridge is energized.
+bool FOC_Set_Direction(FOC_t *foc, BLDC_Direction_t dir)
+{
+    if (foc == NULL || (dir != NORMAL_DIRECTION && dir != REVERSE_DIRECTION))
+    {
+        return false;
+    }
+    if (foc->outputs_enabled)
+    {
+        return false; // Energized: calibration, startup or running
+    }
+
+    foc->rotor_dir = dir;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // De-energize the bridge and drop out of closed loop.
 // Zeroing the duty registers is what actually stops the motor: the ISR latches
 // pwm_a/b/c into CCR1-3 every period regardless of mode.
@@ -1099,10 +1120,12 @@ FOC_FAST_CODE void FOC_Update(FOC_t *foc)
             // Closed-loop control
 
             // Derive the current references. In speed mode the speed loop drives iq_ref;
-            // in torque mode MTPA splits the stator current magnitude is_ref.
+            // in torque mode MTPA splits the stator current magnitude is_ref (relative to
+            // rotor_dir: positive drives in that direction, negative brakes).
             if (foc->foc_mode == FOC_TORQUE_CONTROL)
             {
-                FOC_MTPA(foc, foc->is_ref, &(foc->id_ref), &(foc->iq_ref));
+                const float is = (foc->rotor_dir == NORMAL_DIRECTION) ? foc->is_ref : -foc->is_ref;
+                FOC_MTPA(foc, is, &(foc->id_ref), &(foc->iq_ref));
             }
             else
             {
@@ -1421,10 +1444,10 @@ static inline float Wrap_Pm_Pi(float a)
 }
 
 // Speed loop (FOC_SPEED_CONTROL, MOTOR_RUNNING), every SPEED_CTRL_DIVIDER periods.
-// Works in the rotation-direction frame (error and torque positive = speeding up in
-// rotor_dir), so a single clamp keeps it motoring only: the output and the integrator
-// never go negative, so the drive never brakes and returns no energy to the bus.
-// When speed_ref drops, the motor slows by friction and load.
+// Works in the rotation-direction frame (speed_ref, speed_ref_ramp, error and torque all
+// positive = in rotor_dir), so a single clamp keeps it motoring only: the output and the
+// integrator never go negative, so the drive never brakes and returns no energy to the bus.
+// When speed_ref drops, the motor slows by friction and load; a negative speed_ref is 0.
 FOC_FAST_CODE static void FOC_Speed_Control(FOC_t *foc)
 {
     if (++foc->speed_div < SPEED_CTRL_DIVIDER)
@@ -1434,9 +1457,10 @@ FOC_FAST_CODE static void FOC_Speed_Control(FOC_t *foc)
     foc->speed_div = 0;
 
     const float dir = (foc->rotor_dir == NORMAL_DIRECTION) ? 1.0f : -1.0f;
-    foc->speed_ref_ramp = Slew_To(foc->speed_ref_ramp, foc->speed_ref, SPEED_REF_SLEW * TS_SPEED);
+    const float target = (foc->speed_ref > 0.0f) ? foc->speed_ref : 0.0f;
+    foc->speed_ref_ramp = Slew_To(foc->speed_ref_ramp, target, SPEED_REF_SLEW * TS_SPEED);
 
-    float iq = PI_Step(&(foc->speed_ctrl), dir * (foc->speed_ref_ramp - foc->smo.omega_est));
+    float iq = PI_Step(&(foc->speed_ctrl), foc->speed_ref_ramp - dir * foc->smo.omega_est);
     if (iq < 0.0f)
     {
         iq = 0.0f;
@@ -1608,7 +1632,7 @@ FOC_FAST_CODE void FOC_BLDC_Startup_Update(FOC_t *foc)
             // about I_STARTUP before starting, or ramp it, to avoid a torque step.)
             // (No printf here: this runs in the ADC ISR. The application logs the handover.)
             foc->speed_ctrl.integral = dir * foc->iq_ref;
-            foc->speed_ref_ramp = foc->smo.omega_est;
+            foc->speed_ref_ramp = dir * foc->smo.omega_est;
             foc->speed_div = 0;
             foc->motor_mode = MOTOR_RUNNING;
         }

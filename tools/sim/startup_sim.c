@@ -51,7 +51,7 @@ int main(int argc, char **argv)
     foc.foc_mode = FOC_TORQUE_CONTROL;
     foc.motor_mode = MOTOR_IDLE;
     foc.is_ref = 3.0f; /* torque command in RUN = startup current: no step */
-    if (argc > 6 && atoi(argv[6]) < 0) { foc.rotor_dir = REVERSE_DIRECTION; foc.is_ref = -3.0f; }
+    if (argc > 6 && atoi(argv[6]) < 0) FOC_Set_Direction(&foc, REVERSE_DIRECTION); /* is_ref and speed_ref are relative to the direction */
 
     double id = 0, iq = 0, th = 2.0 /* unknown initial rotor angle */, wm = 0;
     uint32_t pa = PWM_RES / 2, pb = PWM_RES / 2, pc = PWM_RES / 2; int bridge_on = 0;

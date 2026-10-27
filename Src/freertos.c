@@ -43,6 +43,7 @@
 #define ADC_INJ_SMP 0 // Injected-channel ADC sampling time code: 0 = keep CubeMX (1.5 cycles), 4 = 19.5, 5 = 61.5
 #endif
 #define RUN_FOC_TEST 1 // 0: stop after calibration (current-sign diagnostic), 1: run the 5 s speed test
+#define RUN_DIRECTION NORMAL_DIRECTION // Speed test direction: NORMAL_DIRECTION or REVERSE_DIRECTION
 
 /* USER CODE END PD */
 
@@ -442,6 +443,14 @@ void StartDefaultTask(void *argument)
     // Speed test: 1500 rad/s el (~2050 rpm), stepped to 2500 (~3400 rpm) at t = 3 s; both below
     // ESMO_OMEGA_MAX. The speed loop takes over at the startup handover (FOC_Speed_Control).
     // foc.is_ref = 3.0f;   // Torque mode instead: stator current magnitude (A), runs away unloaded
+    // Speeds and is_ref are relative to the direction (positive = in RUN_DIRECTION).
+    // FOC_CALIBRATION keeps the bridge enabled (zero vector) after the last injection, and the
+    // direction can only be set with the bridge off: go idle first (the ISR turns the outputs
+    // off within one PWM period), then set the direction, then start.
+    foc.foc_mode = FOC_IDLE;
+    osDelay(2);
+    if (!FOC_Set_Direction(&foc, RUN_DIRECTION))
+        printf("!! FOC_Set_Direction refused (bridge energized)\r\n");
     foc.speed_ref = 1500.0f;
     foc.motor_mode = MOTOR_IDLE;
     foc.foc_mode = FOC_SPEED_CONTROL;

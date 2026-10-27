@@ -391,22 +391,22 @@ typedef struct
     uint16_t adc_v_bus;                 // ADC value for bus voltage
 
     // Operation parameters
-    BLDC_Direction_t rotor_dir;     // Rotor rotation direction
+    BLDC_Direction_t rotor_dir;     // Rotation direction: set with FOC_Set_Direction (bridge off only)
     float v_bus;                    // DC bus voltage
     float i_a, i_b;                 // Measured phase currents
     float i_alpha, i_beta;          // Clarke transformed currents
     float i_d, i_q;                 // Park transformed currents
     float id_filtered, iq_filtered; // Filtered DQ currents
 
-    float speed_ref;       // Desired rotor speed (electrical rad/s, signed)
-    float speed_ref_ramp;  // speed_ref after the SPEED_REF_SLEW ramp (what the speed PI tracks)
+    float speed_ref;       // Desired speed in rotor_dir (electrical rad/s, >= 0; negative = 0, motoring only)
+    float speed_ref_ramp;  // speed_ref after the SPEED_REF_SLEW ramp (what the speed PI tracks), in rotor_dir
     uint16_t speed_div;    // Current-loop periods since the last speed-loop update
     bool vbus_fault;       // Set when the bus over-voltage trip (V_BUS_MAX) coasted the drive
     float harm_p[2], harm_n[2]; // 6x harmonic integrators (+6 / -6 sequence frames), volts
     float harm_rp[2], harm_rn[2]; // Their phase-compensation phasors (unit), refreshed at 1 kHz
     uint16_t harm_div;     // Current-loop periods since the last phasor refresh
     float id_ref, iq_ref;  // Desired DQ currents
-    float is_ref;          // Desired stator current magnitude
+    float is_ref;          // Torque mode: stator current (A) relative to rotor_dir (positive drives, negative brakes)
     float v_d, v_q;        // DQ voltages
     float v_alpha, v_beta; // Inverse Park transformed voltages
 
@@ -495,6 +495,7 @@ extern "C"
     void FOC_Init(FOC_t *foc, uint32_t pwm_res, uint32_t adc_offset);
     void FOC_Recalc_Params(FOC_t *foc); // Recalculate FOC parameters after BLDC specs update
     void FOC_Coast(FOC_t *foc);         // Disable the outputs (outputs_enabled = false) and drop to idle
+    bool FOC_Set_Direction(FOC_t *foc, BLDC_Direction_t dir); // Bridge off only; false otherwise
     void FOC_MTPA(FOC_t *foc, float Is, float *Id_ref, float *Iq_ref);
     void FOC_Current_Loop_Update(FOC_t *foc);
     void FOC_BLDC_Startup_Update(FOC_t *foc);

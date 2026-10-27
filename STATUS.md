@@ -5,6 +5,36 @@ Git history starts on 2026-10-26; this file holds the record before that and the
 status of each change (compile / sim / hardware). Newest first below; older sections are
 history (marked superseded where they no longer apply).
 
+## 2026-10-27: rotation direction API, direction-relative references
+
+- `bool FOC_Set_Direction(FOC_t *, BLDC_Direction_t)`: sets `rotor_dir` only while the bridge is
+  off (`outputs_enabled == false`: idle, coasted or faulted); returns false and keeps the old
+  direction if energized (calibration, startup, running), for an invalid value or NULL. The drive
+  is motoring only and cannot brake to reverse: stop, set, start again (user decision).
+- `speed_ref`, `speed_ref_ramp` and `is_ref` are now relative to `rotor_dir` (user decision):
+  positive = in the selected direction. A negative `speed_ref` is treated as 0 (motoring only);
+  a negative `is_ref` in torque mode is braking torque. Forward behaviour is unchanged. Before,
+  `speed_ref` was signed in the electrical frame, so reverse speed mode with a positive
+  reference computed zero current and never ran; reverse torque mode needed `is_ref < 0`.
+- `Src/freertos.c`: `RUN_DIRECTION` (default `NORMAL_DIRECTION`) selects the bench test direction
+  through `FOC_Set_Direction`. Sims use the setter for their `dir = -1` argument.
+- Verification: `pio run` OK (Flash 49300 B). Every existing sim output byte-identical (`cmp`) to
+  HEAD 8aa9fb6, including reverse `startup_sim` (was `is_ref = -3`, now `+3` relative).
+  `speed_sim ... -1` (reverse, previously impossible) holds −1500 / −2500 rad/s el with the same
+  ripple and angle error as forward. Host test of the setter: accepted while off, refused while
+  energized / invalid / NULL.
+- Bench, first reverse attempt: the setter was refused ("bridge energized") and the test ran
+  forward. `FOC_CALIBRATION` sets `outputs_enabled = !inj_fault` every period, so after the last
+  injection the bridge keeps switching the zero vector until the mode changes. The bench test now
+  sets `foc_mode = FOC_IDLE`, waits 2 ms (outputs off within one PWM period), sets the direction,
+  then starts. (Open: calibration leaves the bridge energized when nothing follows it, e.g.
+  `RUN_FOC_TEST 0`.)
+- Bench, reverse (`RUN_DIRECTION REVERSE_DIRECTION`, standard profile): align, I-f to −500 rad/s el,
+  lock, handover at −1264, holds −1499.4 [−1500, −1499] and −2499.5 [−2500, −2499] rad/s el,
+  i_q ≈ −0.9 A (mirrors forward), lock never dropped, no break, clean coast. Forward re-run with the
+  go-idle-first sequence: holds 1499.6 / 2499.4 rad/s el, normal. IRQ max ~1605 cycles both ways.
+  Hardware-verified in both directions; the firmware is back to `NORMAL_DIRECTION`.
+
 ## 2026-10-27: board and motor constants overridable by the port
 
 - `#ifndef` guards in `foc_lib.h` on `PWM_RES`, `ADC_RES`, `ADC_V_REF`, `RS`, `LS`, `POLE_PAIRS`,
@@ -78,8 +108,13 @@ history (marked superseded where they no longer apply).
   closed-loop step. The public functions remain as wrappers (the sims use them).
 - `Harm_Phasor`: 7 → 4 divisions (one reciprocal of the RL denominator; the positive
   |1+CG|² scale is dropped because only the phasor direction is used).
-- Verification: `pio run` OK (RAM 55148 B, Flash 56928 B). All `tools/sim` programs give
-  output identical to before at their printed precision. Bench, two runs of the standard
+- Verification: `pio run` OK (RAM 55148 B, Flash 56928 B). `tools/sim`: `esmo_sim`, `speed_sim`,
+  `svpwm_check`, `pi_windup`, `math_check`, `normalize_check` identical; float rounding from the
+  reassociated products shifts a few last digits elsewhere (`startup_sim` coast case: max
+  current-vector jump 155.7 → 155.5 deg; real-motor case: RUNNING at 1.2623 instead of 1.2624 s,
+  peak 3.0 → 3.1 A as printed; `calib_sim` currents ±1 µA). (Corrected 2026-10-27: this entry and
+  commit dbf5e60 first said "identical", because the shell's `diff` wrapper hid the
+  differences; checked with `cmp`.) Bench, two runs of the standard
   profile: ISR cycles Align 1133 → 1051, I-f 1907 → 1809, transition 1796 → 1705, running
   median 1954 → 1844, run max 2546 → 2267 (of 3600). Holds 1500 / 2500 rad/s el within
   ±1–3 rad/s, lock never dropped, no break; i_d means within the 50 Hz log's sampling spread.
