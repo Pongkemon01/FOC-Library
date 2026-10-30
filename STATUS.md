@@ -5,6 +5,21 @@ Git history starts on 2026-10-26; this file holds the record before that and the
 status of each change (compile / sim / hardware). Newest first below; older sections are
 history (marked superseded where they no longer apply).
 
+## 2026-10-30: demo application (Src/freertos.c) cleaned up
+
+- Restructured as the reference for using foc-lib: a usage overview at the top, options grouped,
+  a port layer (console, TIMER_config, Start_PWM, Bridge_Outputs), the demo steps as functions
+  (Measure_Current_Offsets, Calibrate, Saliency_Sweep, Speed_Test with Test_Speed_Ref per
+  TEST_PROFILE and Log_Row), the control ISR documented as the library contract. Comments and
+  recommendations (bench current cap, supply power, task stack, torque mode). Removed the unused
+  Stop_PWM / Set_Debug / Clear_Debug; Indonesian comments translated. CubeMX-generated code
+  outside the USER CODE blocks unchanged (checked).
+- Behaviour change: the zero-current offsets are a 64-sample average (was one sample); Ld/Lq are
+  not recalculated when a run aborted. Log format unchanged (tools/hfi_threshold.py still reads it).
+- Verification: compile (RAM 78.5 %, Flash 9.9 %); bench 2026-10-30 (prop on, TEST_PROFILE 4):
+  offsets A/B/C 2092/2034/2066, Rs 0.02266, Ld/Lq 5.57/7.19 uH, sweep A2 0.91 uH, HFI start kept
+  polarity (11 %), 150 hold 149.5 rad/s el, HFI -> eSMO at ~456, ISR max 2213, no faults.
+
 ## 2026-10-30: foc-lib refactored for portability (no behaviour change)
 
 - `foc_lib.h`: porting guide at the top, then parameters in three parts: (1) board/sensing/motor
