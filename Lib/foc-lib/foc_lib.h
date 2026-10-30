@@ -216,21 +216,53 @@
 #define INJECTION_OMEGA (TWO_PI * INJECTION_FREQ) // Injection angular frequency (rad/s)
 
 // ---------------------------------------------------------------------------
-// Passive HF-injection estimator (FOC_HFI_Update, MOTOR_RUNNING only, never steers foc->theta).
-// A +-HFI_VOLTAGE square wave at PWM_FREQ/4 (sign held 2 periods: + + - -) is added along an
-// axis offset by delta from the control d-axis; delta sweeps 0..pi once per HFI_WINDOW periods.
+// HF-injection (HFI) tracker for low speed, and the eSMO <-> HFI switch (MOTOR_RUNNING, when
+// foc->hfi_enable). A +-HFI_VOLTAGE square wave at PWM_FREQ/4 (sign held 2 periods: + + - -) is
+// injected along the tracker's own d-axis estimate hfi_theta.
 // Not PWM_FREQ/2: TIM1 takes a new duty mid-period, so a sign flipped every period cancels
 // within each sampling interval (bench 2026-10-27: HF step 0.13 A instead of ~1.2 A).
-// The per-period current step (unfiltered currents) is projected on the applied axis and
-// correlated with the PWM_FREQ/4 reference; normalising by the parallel phasor makes the result
-// independent of where in the period the duty changes. The perpendicular part ~ sin(2(delta - e))
-// gives the saliency amplitude and e = rotor d-axis (saliency minimum) minus control angle, mod pi.
-// At L ~ 6.4 uH, 0.075 V gives ~0.6 A per period, +-0.6 A ripple.
+// Each period the current step (unfiltered currents) is projected on the axis applied HFI_DELAY
+// periods earlier; sliding PWM_FREQ/4 phasors of the parallel (Zp) and perpendicular (Zq) parts
+// over the last 4 periods give eps = Re(Zq conj(Zp)) / |Zp|^2 = HFI_K * sin(2 e), e = rotor d-axis
+// (saliency minimum) minus hfi_theta, independent of where in the period the duty changes.
+// A PLL drives e to 0. At L ~ 6.4 uH, 0.075 V gives ~0.6-0.8 A per period (+-0.8 A ripple).
+// Switching (foc->omega is the active estimator's speed):
+//   eSMO -> HFI: tracker on below HFI_OMEGA_ON (started at the eSMO angle, which fixes the N/S
+//                ambiguity), in control below HFI_OMEGA_LOW once warmed up (HFI_WARMUP) and within
+//                HFI_AGREE_ANGLE of the eSMO (else the tracker is re-seeded).
+//   HFI -> eSMO: above HFI_OMEGA_UP, after the eSMO is locked and agrees with the tracker in
+//                angle and speed for HFI_AGREE_PERIODS.
+//   Both switches blend the control angle at ANGLE_BLEND_RATE (no current-vector step).
+// HFI_OMEGA_LOW is the eSMO's lowest trusted speed (checked on the bench, see its definition): with the tracker
+// running alongside the eSMO (below HFI_OMEGA_ON) log their angle difference against speed and
+// set it where the difference starts to grow.
 #ifndef HFI_VOLTAGE
 #define HFI_VOLTAGE 0.075f // Square-wave amplitude (V)
 #endif
-#define HFI_WINDOW 2000u  // Periods per estimate (0.1 s at 20 kHz, multiple of 4); delta covers 0..pi
-#define HFI_DELAY 2u      // Periods from the command to the current step it causes (axis projection)
+#ifndef HFI_OMEGA_LOW
+#define HFI_OMEGA_LOW 293.0f // eSMO -> HFI below this |omega| (electrical rad/s): 400 rpm at 7 pole pairs.
+                             // Bench shadow sweep 2026-10-30: eSMO-HFI spread grows below ~300 (STATUS.md)
+#endif
+#define HFI_OMEGA_UP (1.3f * HFI_OMEGA_LOW) // HFI -> eSMO above this
+#define HFI_OMEGA_ON (1.6f * HFI_OMEGA_LOW) // Tracker (injection) on below this while the eSMO is in control
+#ifndef HFI_K
+#define HFI_K 0.30f // Saliency signal |Zq| / |Zp| at 2 e = 90 deg (bench 2026-10-27/30 at 5 kHz: 0.28-0.31)
+#endif
+#define HFI_PLL_BW (TWO_PI * 40.0f)                // Tracker PLL natural frequency (rad/s), critically damped
+#define HFI_PLL_KP (2.0f * HFI_PLL_BW)             // rad/s per rad of angle error
+#define HFI_PLL_KI (HFI_PLL_BW * HFI_PLL_BW)       // rad/s^2 per rad
+#define HFI_DELAY 2u                               // Periods from the command to the current step it causes
+#define HFI_WARMUP ((uint32_t)(0.02f * PWM_FREQ))  // Tracker running before it may take control (20 ms)
+#define HFI_AGREE_ANGLE 0.2f                       // HFI -> eSMO: max angle difference (rad, ~11 deg)
+#define HFI_AGREE_PERIODS ((uint32_t)(0.01f * PWM_FREQ)) // ... held this long (10 ms)
+#define HFI_ZP_MIN 0.3f                            // Fault: HF response |Zp| below this (A; bench ~2.3, sim ~0.9)
+#define HFI_ERR_MAX 0.35f                          // Fault: |e| above this (rad) ...
+#define HFI_FAULT_PERIODS ((uint32_t)(0.02f * PWM_FREQ)) // ... or |Zp| low, for this long (20 ms) -> coast
+// A tracker locked on the wrong pole (theta + pi) shows a normal |Zp| and e ~ 0, but drives the
+// rotor backwards: in HFI control, rotation against rotor_dir faster than HFI_REVERSE_OMEGA for
+// HFI_REVERSE_PERIODS latches hfi_fault and coasts (the drive is motoring only).
+#define HFI_REVERSE_OMEGA 50.0f                    // Electrical rad/s
+#define HFI_REVERSE_PERIODS ((uint32_t)(0.05f * PWM_FREQ)) // 50 ms
 
 // ---------------------------------------------------------------------------
 // FOC control parameters
@@ -448,25 +480,25 @@ typedef struct
     float id_inj_buff[INJECTION_ROUNDS]; // Buffer for measured currents
     float iq_inj_buff[INJECTION_ROUNDS];
 
-    // Passive HFI estimator (see HFI_VOLTAGE). hfi_enable is written by the application;
-    // the rest is ISR state and the latched results of the last complete window.
-    bool hfi_enable;
-    uint32_t hfi_cnt;               // Periods since (re)start, stops at HFI_DELAY + 1 (history filled)
+    // HFI tracker and eSMO <-> HFI switch (see HFI_VOLTAGE). hfi_enable is written by the
+    // application; the rest is ISR state.
+    bool hfi_enable;                // Allow the HFI low-speed mode
+bool hfi_takeover;              // false: tracker only (shadow run, logs eSMO vs HFI), never in control
+    bool hfi_on;                    // Tracker running (injecting)
+    bool hfi_control;               // true: the transforms use the HFI angle; false: the eSMO's
+    bool hfi_fault;                 // Latched: lost the HF response or the track (coasted)
+    uint32_t hfi_cnt;               // Periods since the tracker started (stops at HFI_WARMUP)
     uint32_t hfi_idx;               // Square-wave phase 0..3 (sign + for 0, 1)
-    float hfi_delta;                // Injection axis offset from the control d-axis (rad, 0..pi)
-    float hfi_c2_h[HFI_DELAY];      // cos(2 delta) of the last HFI_DELAY periods ([0] = newest)
-    float hfi_s2_h[HFI_DELAY];      // sin(2 delta) of the last HFI_DELAY periods
-    float hfi_phi_h[HFI_DELAY];     // Applied injection axis angle (alpha-beta) of the last HFI_DELAY periods
+    uint32_t hfi_agree_cnt;         // HFI -> eSMO: consecutive periods of agreement
+    uint32_t hfi_fault_cnt;         // Consecutive periods with a bad HF response or a large error
+uint32_t hfi_rev_cnt;           // Consecutive periods of rotation against rotor_dir in HFI control
+    float hfi_theta;                // Tracker angle (rad el, 0..2pi): rotor d-axis estimate
+    float hfi_omega;                // Tracker speed (PLL integrator, electrical rad/s)
+    float hfi_phi_h[HFI_DELAY];     // Applied injection axis angle (alpha-beta), [0] = newest
     float hfi_ia_h, hfi_ib_h;       // Unfiltered alpha/beta currents of the previous sample
-    uint32_t hfi_n;                 // Samples in the current window
-    float hfi_zp[2];                // Window sums (complex, PWM_FREQ/4 reference): par
-    float hfi_zc[2], hfi_zs[2];     //   perp * cos(2 delta), perp * sin(2 delta)
-    float hfi_k;                    // Result: saliency signal |perp| / par amplitude (-)
-    float hfi_err;                  // Result: rotor d-axis minus control angle (rad, mod pi, -pi/2..pi/2)
-    float hfi_apar;                 // Result: HF current step per period along the axis (A)
-    float hfi_phase;                // Result: phase of the par phasor (rad): timing diagnostic
-    uint32_t hfi_windows;           // Completed windows
-
+    float hfi_par[4], hfi_perp[4];  // Current steps of the last 4 periods, by square-wave phase
+    float hfi_err;                  // Angle error e (rad), diagnostic
+    float hfi_zp;                   // |Zp| (A), diagnostic
     // Angle used by the Park / inverse Park transforms, set by the state machine:
     // align angle, forced angle, blended angle or observer angle. The observer's
     // own state (smo.theta_est) is never overwritten.
@@ -503,7 +535,6 @@ extern "C"
     void FOC_BLDC_Parameter_Calculation_Resistance(FOC_t *foc);
     void FOC_BLDC_Parameter_Calculation_Inductance(FOC_t *foc);
     bool FOC_BLDC_Saliency_Point(const FOC_t *foc, float *L_axis, float *cross_re, float *cross_im);
-    void FOC_HFI_Update(FOC_t *foc);
 
     // Trigonometric functions: table look-up (1024 samples/turn) + linear interpolation.
     // Frameless fast path for angles in [0, 2pi); other angles are wrapped first.

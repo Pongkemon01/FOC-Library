@@ -5,6 +5,66 @@ Git history starts on 2026-10-26; this file holds the record before that and the
 status of each change (compile / sim / hardware). Newest first below; older sections are
 history (marked superseded where they no longer apply).
 
+## 2026-10-30: eSMO <-> HFI switching during MOTOR_RUNNING (step 3 of the HFI plan)
+
+- The passive delta-sweep estimator is replaced by an HFI **tracker** that can steer:
+  +-`HFI_VOLTAGE` square wave at PWM_FREQ/4 along its own estimate `hfi_theta`; per period the
+  current step is projected on the axis applied 2 periods earlier, sliding PWM_FREQ/4 phasors over
+  the last 4 periods give eps = Re(Zq conj Zp)/|Zp|^2 = HFI_K sin 2e (no timing assumption),
+  PLL (`HFI_PLL_BW` 40 Hz, critically damped) -> `hfi_theta`, `hfi_omega`.
+- `FOC_Current_Loop_HFI` (MOTOR_RUNNING with `foc->hfi_enable`): the eSMO runs every period.
+  Tracker on below `HFI_OMEGA_ON` (1.6 x LOW), started at the eSMO angle/speed (fixes N/S);
+  HFI takes control below `HFI_OMEGA_LOW` (293 rad/s el = 400 rpm, hard-coded, not measured)
+  after `HFI_WARMUP` (20 ms); back to the eSMO above `HFI_OMEGA_UP` (1.3 x LOW) once the eSMO is
+  locked and agrees (angle < 0.2 rad, speed < 20 %) for 10 ms. Both switches blend the angle
+  (`angle_offset`, ANGLE_BLEND_RATE). In HFI control the eSMO's lock flag is ignored; HFI fault
+  (|Zp| < `HFI_ZP_MIN` or |e| > `HFI_ERR_MAX` for 20 ms) coasts with `hfi_fault`. The speed loop
+  now uses `foc->omega` (the active estimator; identical to `smo.omega_est` with HFI off).
+  `HFI_K` (default 0.30, bench) normalises the PLL gain; sims build with `-DHFI_K=0.14f`.
+- Startup is unchanged (Align -> I-f -> eSMO); starting directly on HFI still needs the N/S
+  polarity step.
+- `Src/freertos.c`: `RUN_HFI`, `TEST_PROFILE` (0: 1500/2500, 1: prop staircase, 2: low speed:
+  1500, 150 from 2.5 s, 0 from 8.5 s, 1500 from 10 s); log columns on/ctl/smo_hfi/w_hfi/zp/err/flt.
+  smo_hfi (eSMO minus HFI angle while both run, below HFI_OMEGA_ON) is the data for choosing
+  HFI_OMEGA_LOW: where it starts to grow as the speed falls.
+- Verification: compile (RAM 78.5 %, Flash 10.0 %; HFI code inlined in FOC_Update in .ccmram);
+  HFI off: all sims byte-identical to c4c36a9. Sim (`speed_sim` PROF=low HFI=0 HALF=0.5,
+  -DHFI_K=0.14f): eSMO -> HFI at 286 rad/s el, holds 150 (true 146-152) and 0 rad/s, angle error
+  mean < ~1-2 deg (per-sample max 7-11 deg), back to the eSMO at ~415 rad/s el (0.8 deg), no
+  fault; tracker seeded +-30 deg pulls in within ~10-100 ms (error sign right); stable with
+  HFI_K 2x high or low; prop J/kfan + dead time OK. Bench: not run yet.
+- Safety additions (same day): `foc->hfi_takeover` (false = shadow: tracker runs and is logged,
+  never in control); takeover also requires |eSMO - HFI| < `HFI_AGREE_ANGLE`, else the tracker is
+  re-seeded from the eSMO (a wrong-pole lock seeded at +180 deg reversed the rotor to -946 rad/s
+  el at 15 A before this gate; now it re-seeds and takes over correctly, peak 3.2 A); backstop
+  guard: in HFI control, rotation against `rotor_dir` beyond `HFI_REVERSE_OMEGA` (50 rad/s el)
+  for 50 ms latches `hfi_fault` and coasts.
+- More sims: dead time 20/30 mV at the 150 and 0 holds, reverse direction, the exact bench
+  schedule (`PROF=bench`) with and without the prop: all switch at ~286-292 / ~410-430 rad/s el,
+  no fault. Shadow (`SHADOW=1`): the eSMO keeps control to 150, coasts at 0 (lock lost), as
+  designed. With HFI enabled, the 1500/2500 profile is identical to HFI off (tracker never on).
+- `Src/freertos.c`: `RUN_HFI` 0 off / 1 shadow / 2 takeover; `TEST_PROFILE 3` = slow sweep
+  (800 -> 100 rad/s el at 100 rad/s^2) for the shadow run; `TEST_I_MAX` 5 A. Bench plan: stage 1
+  shadow + profile 3 (measures where smo_hfi grows = the eSMO's real limit), stage 2 takeover +
+  profile 2.
+- **Bench 2026-10-30, stage 1 shadow sweep** (prop removed; RUN_HFI 1, TEST_PROFILE 3, 5 A cap,
+  0.075 V at 5 kHz below 469 rad/s el): no fault; the tracker ran on hardware from 469 down to
+  the 100 rad/s el hold (|Zp| 2.4-3.9 A, far above HFI_ZP_MIN). eSMO minus HFI angle by speed:
+  400-470: -2.4 +- 1.3 deg; 300-400: -2.7 +- 1.4; 200-300: -3.7 +- 2.3; 130-200: -3.7 +- 3.2;
+  <130: -4.0 +- 5.2 (min/max -15.5/+6.2). Constant offset ~-2.5..-4 deg; the spread (the eSMO's
+  noise; the tracker's should not depend on speed) grows below ~300 rad/s el, so HFI_OMEGA_LOW
+  = 293 rad/s el (400 rpm) sits at the knee: **keep it** (now measured, not just assumed).
+  The eSMO's lock flag stayed true at 100 rad/s el (emf ~65 mV): useless as a limit, as expected.
+  ISR max 2123 cycles of 3600 with eSMO + tracker.
+- **Bench 2026-10-30, stage 2 HFI takeover** (prop removed; RUN_HFI 2, TEST_PROFILE 2, 5 A cap):
+  **hardware-verified, no fault.** Coast-down from 1500: tracker on at ~456 rad/s el, **HFI took
+  control at 296 rad/s el** (eSMO - HFI -5 deg at the switch). 150 hold under HFI (3.9 s): HFI
+  speed 150.6 +- 6.4 rad/s el (eSMO alongside: 149.0), eSMO - HFI -3.8 +- 3.2 deg, tracker error
+  rms 3.8 deg, iq 0.51 A. 0 hold: HFI speed 0.0 +- 0.5, iq 0.24 A (the eSMO wanders, +-120 deg,
+  ignored). Step to 1500: **back to the eSMO at ~450 rad/s el** with iq ~4.5 A while accelerating,
+  tracker off at ~545, then the normal 1500 hold. ISR max 2173 cycles of 3600.
+  Not yet tested: HFI under load at low speed, starting from standstill on HFI (needs N/S polarity).
+
 ## 2026-10-30: cleanup
 
 - Removed write-only `FOC_t` fields: `pwm_a/b/c_buff`, `adc_v_a/b_buff` (4 KB RAM: 84.8 % -> 78.5 %)

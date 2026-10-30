@@ -12,8 +12,12 @@
  *   LD_EST, RS_EST   controller's (calibrated) Ld / Rs differing from the plant
  *   XD       extra PWM periods of delay in the plant (unmodelled latency)
  *   J        rotor inertia (default 1.4e-5 kg m^2, from the bench acceleration)
- *   HFI      time (s) to enable the passive HFI estimator; prints every window with the TRUE
- *            rotor-minus-control angle averaged over the window
+ *   HFI      time (s) to set foc.hfi_enable (eSMO <-> HFI switching); prints each switch and,
+ *            every 0.1 s while enabled, the TRUE rotor-minus-control angle (mean, max |.|)
+ *   PROF     "low": speed_ref 1500, 150 from 2 s, 0 from 5 s, 1500 from 7 s (instead of 1500/2500);
+ *            "bench": the freertos.c TEST_PROFILE 2 schedule (150 from 2.5 s, 0 from 8.5 s, 1500 from 10 s)
+ *   SHADOW   1: foc.hfi_takeover = false (tracker runs alongside the eSMO, never in control)
+ *   SEED     offset (deg) added to the HFI tracker's start angle (sign / pull-in test)
  *   VDT, I0  inverter dead-time error per phase (V) with a soft knee (A), as in calib_sim
  *   VSAG     time (s) at which the bus falls from 12 V to 6 V over 50 ms (supply current limit)
  *   HALF     fraction of each period still driven by the previous command (0 = default
@@ -83,7 +87,12 @@ int main(int argc, char **argv)
     const double t_sag = getenv("VSAG") ? atof(getenv("VSAG")) : -1;
     const double vdt = getenv("VDT") ? atof(getenv("VDT")) : 0, i0 = getenv("I0") ? atof(getenv("I0")) : 0.05;
     const double half = getenv("HALF") ? atof(getenv("HALF")) : 0; /* fraction of the period still on the old command */ uint32_t ha = PWM_RES / 2, hb = PWM_RES / 2, hc = PWM_RES / 2;
-    uint32_t hfi_windows = 0; double hfi_e_sum = 0, hfi_q_sum = 0; long hfi_e_n = 0;
+    const int prof_low = getenv("PROF") && !strcmp(getenv("PROF"), "low");
+    const int prof_bench = getenv("PROF") && !strcmp(getenv("PROF"), "bench");
+    if (getenv("SHADOW") && atoi(getenv("SHADOW"))) foc.hfi_takeover = false;
+    const double seed = getenv("SEED") ? atof(getenv("SEED")) * M_PI / 180 : 0;
+    double hfi_e_sum = 0, hfi_e_max = 0, hfi_q_sum = 0; long hfi_e_n = 0;
+    int last_on = 0, last_ctrl = 0;
 
     for (long k = 0; k * Ts < t_end; k++) {
         double t = k * Ts;
@@ -99,16 +108,25 @@ int main(int argc, char **argv)
 
         if (t_coast > 0 && t >= t_coast && t - Ts < t_coast) FOC_Coast(&foc);
 
-        if (t >= 3.0) foc.speed_ref = 2500.0f;
-        if (t_hfi >= 0 && t >= t_hfi && foc.motor_mode == MOTOR_RUNNING) foc.hfi_enable = true;
+        if (prof_bench) foc.speed_ref = (t >= 10.0) ? 1500.0f : (t >= 8.5) ? 0.0f : (t >= 2.5) ? 150.0f : 1500.0f;
+        else if (prof_low) foc.speed_ref = (t >= 7.0) ? 1500.0f : (t >= 5.0) ? 0.0f : (t >= 2.0) ? 150.0f : 1500.0f;
+        else if (t >= 3.0) foc.speed_ref = 2500.0f;
+        if (t_hfi >= 0 && t >= t_hfi) foc.hfi_enable = true;
         FOC_Update(&foc);
-        if (foc.hfi_enable) {
-            hfi_e_sum += wrap(th - foc.theta); hfi_q_sum += iq; hfi_e_n++;
-            if (foc.hfi_windows != hfi_windows) {
-                hfi_windows = foc.hfi_windows;
-                printf("      HFI t=%.2f  k %.4f  err %+6.2f deg  apar %.3f A | true rotor-control %+6.2f deg, iq %.2f A, w %.0f\n",
-                       t, foc.hfi_k, foc.hfi_err * 180 / M_PI, foc.hfi_apar, hfi_e_sum / hfi_e_n * 180 / M_PI, hfi_q_sum / hfi_e_n, wm * p);
-                hfi_e_sum = hfi_q_sum = 0; hfi_e_n = 0;
+        if (foc.hfi_on && !last_on && seed != 0) foc.hfi_theta = (float)fmod(foc.hfi_theta + seed + 2 * M_PI, 2 * M_PI);
+        if (foc.hfi_on != last_on || foc.hfi_control != last_ctrl)
+            printf("    t=%7.4f s  HFI tracker %s, control %s  speed %6.1f rad/s el (est %.0f, eSMO %.0f, HFI %.0f), rotor-control %+.2f deg, HFI-rotor %+.2f deg%s\n",
+                   t, foc.hfi_on ? "ON " : "off", foc.hfi_control ? "HFI " : "eSMO", wm * p, foc.omega, foc.smo.omega_est, foc.hfi_omega,
+                   wrap(th - foc.theta) * 180 / M_PI, wrap(foc.hfi_theta - th) * 180 / M_PI, foc.hfi_fault ? " FAULT" : "");
+        last_on = foc.hfi_on; last_ctrl = foc.hfi_control;
+        if (foc.hfi_enable && foc.motor_mode == MOTOR_RUNNING) {
+            double e = wrap(th - foc.theta);
+            hfi_e_sum += e; hfi_q_sum += iq; hfi_e_n++; if (fabs(e) > hfi_e_max) hfi_e_max = fabs(e);
+            if (k % 2000 == 0) {
+                printf("      HFI t=%.1f ref %5.0f true %6.1f est %6.1f [%s] rotor-control mean %+6.2f max %5.2f deg, HFI-rotor %+6.2f deg, |Zp| %.2f A, iq %.2f A\n",
+                       t, foc.speed_ref_ramp, wm * p, foc.omega, foc.hfi_control ? "HFI " : foc.hfi_on ? "eSMO+t" : "eSMO",
+                       hfi_e_sum / hfi_e_n * 180 / M_PI, hfi_e_max * 180 / M_PI, wrap(foc.hfi_theta - th) * 180 / M_PI, foc.hfi_zp, hfi_q_sum / hfi_e_n);
+                hfi_e_sum = hfi_q_sum = hfi_e_max = 0; hfi_e_n = 0;
             }
         }
         if (k % 1000 == 0) printf("      t=%.1f mode=%s ref=%.0f est=%.0f true=%.0f iq_ref=%.2f iq=%.2f id=%.2f\n", t, mode_name(foc.motor_mode), foc.speed_ref_ramp, foc.smo.omega_est, wm * p, foc.iq_ref, iq, id);

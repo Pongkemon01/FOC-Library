@@ -47,13 +47,19 @@
 #define RUN_DIRECTION NORMAL_DIRECTION // Speed test direction: NORMAL_DIRECTION or REVERSE_DIRECTION
 #define RUN_SALIENCY_SWEEP 1 // 1: after calibration, Ld-type HF injection at SWEEP_POINTS angles over 0..2pi
 #define SWEEP_POINTS 24
-#define RUN_HFI_PASSIVE 1 // 1: passive HFI estimator on from HFI_ON_MS in the speed test (control unchanged)
-#define HFI_ON_MS 1500
-#define LOAD_STAIRS 1 // 1: gentle staircase for a propeller load (8 s): 1500 rad/s el, ramp 500 rad/s^2 to
-                      // 2000, hold, ramp 250 rad/s^2 to 2500, hold. The bench 12 V 5 A supply collapses at
-                      // ~20 W (2026-10-30), so no 3000 step and slow ramps (less inertia current).
-                      // 0: the usual 1500 -> 2500 at 3 s
-#define TEST_I_MAX 8.0f // Speed-test current cap (A): iq_ref and the speed PI output (default I_RATED)
+#define RUN_HFI 2 // Speed test: 0 eSMO only; 1 HFI shadow (tracker runs below HFI_OMEGA_ON, logs eSMO
+                  // minus HFI, never takes control: the eSMO coasts the drive when it loses lock);
+                  // 2 HFI takes control below HFI_OMEGA_LOW
+#define TEST_PROFILE 2 // Speed test profile (rad/s el):
+                       // 0: 1500, 2500 from 3 s (5 s)
+                       // 1: gentle staircase for a propeller load (8 s): 1500, ramp 500 rad/s^2 to 2000,
+                       //    hold, ramp 250 rad/s^2 to 2500, hold. The bench 12 V 5 A supply collapses at
+                       //    ~20 W (2026-10-30), so no 3000 step and slow ramps (less inertia current).
+                       // 2: low speed (12 s): 1500, 150 from 2.5 s (the drive cannot brake: it coasts
+                       //    down through the eSMO -> HFI switch), 0 from 8.5 s, 1500 from 10 s
+                       // 3: slow sweep down (11 s), for RUN_HFI 1: 1500 to 2.5 s, then 800 falling at
+                       //    100 rad/s^2 to 100 at 9.5 s, hold. smo_hfi vs speed shows the eSMO's limit
+#define TEST_I_MAX 5.0f // Speed-test current cap (A): iq_ref and the speed PI output (default I_RATED)
 
 /* USER CODE END PD */
 
@@ -483,10 +489,12 @@ void StartDefaultTask(void *argument)
     foc.speed_ref = 1500.0f;
     foc.bldc.max_current = TEST_I_MAX;
     PI_Set_Output_Limit(&foc.speed_ctrl, TEST_I_MAX);
+    foc.hfi_enable = (RUN_HFI != 0); // Only acts in MOTOR_RUNNING
+    foc.hfi_takeover = (RUN_HFI == 2);
     foc.motor_mode = MOTOR_IDLE;
     foc.foc_mode = FOC_SPEED_CONTROL;
 
-    // Log the drive state at ~50 Hz for 5 s (8 s with LOAD_STAIRS; task context, never from the ISR). Integers only
+    // Log the drive state at ~50 Hz for the TEST_PROFILE duration (task context, never from the ISR). Integers only
     // (rad/s, mV, mA) to keep printf's stack use low on this task's 512 B stack.
     // brk = TIM1 break flag: the IHM08M1 over-current comparator tripped (outputs latched off).
     // ia/ib are updated every ISR (id/iq freeze once the outputs are off): after a coast they
@@ -496,12 +504,27 @@ void StartDefaultTask(void *argument)
     const uint32_t t0 = osKernelGetTickCount();
     isr_cyc_max = 0;
     irq_cyc_max = 0;
-    // hfi_*: passive HFI results of the last 0.1 s window (k x1e4, err = rotor d-axis minus control
-    // angle in 0.1 deg el, apar = HF step per period along the axis in mA, ph = its phasor phase in deg
-    // (timing diagnostic), win = completed windows)
-    printf("t_ms mode w_force w_ref w_est emf_mV lock cnt id_mA iq_mA ia_mA ib_mA vd_mV vq_mV vbus_mV brk moe isr_cyc irq_cyc hfi_k hfi_err hfi_apar hfi_ph hfi_win\r\n");
+    // HFI columns: on = tracker running, ctl = HFI in control, smo_hfi = eSMO minus HFI angle (0.1 deg el;
+    // where it grows while the speed falls is the eSMO's real low-speed limit), w_hfi = HFI speed,
+    // zp = HF response |Zp| (mA), err = tracker error (0.1 deg), flt = HFI fault (coasted)
+    printf("t_ms mode w_force w_ref w_est emf_mV lock cnt id_mA iq_mA ia_mA ib_mA vd_mV vq_mV vbus_mV brk moe isr_cyc irq_cyc on ctl smo_hfi w_hfi zp err flt\r\n");
     BLDC_Mode_t last_mode = foc.motor_mode;
-#if LOAD_STAIRS
+#if TEST_PROFILE == 3
+    for (int k = 0; k < 550; k++) // 11 s
+    {
+        uint32_t t_ms = osKernelGetTickCount() - t0;
+        if (t_ms < 2500)
+            foc.speed_ref = 1500.0f;
+        else if (t_ms < 9500)
+            foc.speed_ref = 800.0f - 0.1f * (float)(t_ms - 2500);
+        else
+            foc.speed_ref = 100.0f;
+#elif TEST_PROFILE == 2
+    for (int k = 0; k < 600; k++) // 12 s
+    {
+        uint32_t t_ms = osKernelGetTickCount() - t0;
+        foc.speed_ref = (t_ms >= 10000) ? 1500.0f : (t_ms >= 8500) ? 0.0f : (t_ms >= 2500) ? 150.0f : 1500.0f;
+#elif TEST_PROFILE == 1
     for (int k = 0; k < 400; k++) // 8 s
     {
         uint32_t t_ms = osKernelGetTickCount() - t0;
@@ -524,10 +547,6 @@ void StartDefaultTask(void *argument)
         if (t_ms >= 3000)
             foc.speed_ref = 2500.0f;
 #endif
-#if RUN_HFI_PASSIVE
-        if (t_ms >= HFI_ON_MS)
-            foc.hfi_enable = true;
-#endif
         // Handover message, printed here because FOC_Update runs in the ADC ISR (values are
         // up to one logger period after the handover)
         if (foc.motor_mode == MOTOR_RUNNING && last_mode != MOTOR_RUNNING)
@@ -543,17 +562,23 @@ void StartDefaultTask(void *argument)
                (TIM1->SR & TIM_SR_BIF) ? 1 : 0, (TIM1->BDTR & TIM_BDTR_MOE) ? 1 : 0, (int)isr_cyc_last,
                (int)irq_cyc_last);
         // Separate call: fewer varargs per printf on this task's 512 B stack
-        printf(" %d %d %d %d %d\r\n", (int)(foc.hfi_k * 1e4f), (int)(foc.hfi_err * (1800.0f / PI)),
-               (int)(foc.hfi_apar * 1000.0f), (int)(foc.hfi_phase * (180.0f / PI)), (int)foc.hfi_windows);
+        float smo_hfi = foc.smo.theta_est - foc.hfi_theta;
+        if (smo_hfi > PI)
+            smo_hfi -= TWO_PI;
+        else if (smo_hfi < -PI)
+            smo_hfi += TWO_PI;
+        printf(" %d %d %d %d %d %d %d\r\n", (int)foc.hfi_on, (int)foc.hfi_control,
+               (int)(smo_hfi * (1800.0f / PI)), (int)foc.hfi_omega, (int)(foc.hfi_zp * 1000.0f),
+               (int)(foc.hfi_err * (1800.0f / PI)), (int)foc.hfi_fault);
         osDelay(20);
     }
-    foc.hfi_enable = false;
     printf("ISR cycles: max %lu, budget %lu per period (%d Hz PWM)\r\n", (unsigned long)isr_cyc_max,
            (unsigned long)(SystemCoreClock / (uint32_t)PWM_FREQ), (int)PWM_FREQ);
     printf("IRQ cycles (handler entry to callback end): max %lu\r\n", (unsigned long)irq_cyc_max);
     printf("Stopping FOC control... (vbus_fault = %d, vbus_uv_fault = %d)\r\n", (int)foc.vbus_fault,
            (int)foc.vbus_uv_fault);
     foc.foc_mode = FOC_IDLE;
+    foc.hfi_enable = false;
     foc.bldc.max_current = I_RATED;
     PI_Set_Output_Limit(&foc.speed_ctrl, I_RATED);
     // Coast check: the rotor is still spinning down here; ia/ib must stay ~0 with moe = 0

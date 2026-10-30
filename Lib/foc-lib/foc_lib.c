@@ -994,7 +994,10 @@ void FOC_Init(FOC_t *foc, uint32_t pwm_res, uint32_t adc_offset)
     foc->inj_fault = false;
     foc->inj_angle = 0.0f;
     foc->hfi_enable = false;
-    foc->hfi_cnt = 0;
+    foc->hfi_takeover = true;
+    foc->hfi_on = false;
+    foc->hfi_control = false;
+    foc->hfi_fault = false;
 
     // Initialize PI controllers
     PI_Init(&(foc->id_ctrl), KP_I, KI_I, TS, VD_MAX);
@@ -1062,7 +1065,8 @@ FOC_FAST_CODE void FOC_Coast(FOC_t *foc)
     foc->omega = 0.0f;
     foc->foc_mode = FOC_IDLE;
     foc->motor_mode = MOTOR_IDLE;
-    foc->hfi_cnt = 0;
+    foc->hfi_on = false; // HFI restarts from the eSMO after the next start
+    foc->hfi_control = false;
 
     PI_Reset(&(foc->id_ctrl));
     PI_Reset(&(foc->iq_ctrl));
@@ -1072,6 +1076,7 @@ FOC_FAST_CODE void FOC_Coast(FOC_t *foc)
 }
 
 static void FOC_Speed_Control(FOC_t *foc);
+static void FOC_Current_Loop_HFI(FOC_t *foc);
 FOC_INLINE void Current_Loop_Core(FOC_t *foc);
 
 // ---------------------------------------------------------------------------
@@ -1153,16 +1158,13 @@ FOC_FAST_CODE void FOC_Update(FOC_t *foc)
             {
                 FOC_Speed_Control(foc);
             }
-            Current_Loop_Core(foc);
-            // Passive HFI: adds the square wave to v_d/v_q, leaves foc->theta alone.
-            // Current_Loop_Core may have coasted (observer lost): then do nothing.
-            if (foc->hfi_enable && foc->motor_mode == MOTOR_RUNNING)
+            if (foc->hfi_enable)
             {
-                FOC_HFI_Update(foc);
+                FOC_Current_Loop_HFI(foc); // eSMO, or HFI at low speed
             }
             else
             {
-                foc->hfi_cnt = 0;
+                Current_Loop_Core(foc); // eSMO only
             }
             break;
 
@@ -1182,7 +1184,8 @@ FOC_FAST_CODE void FOC_Update(FOC_t *foc)
         foc->v_d = 0.0f;
         foc->v_q = 0.0f;
         foc->outputs_enabled = false;
-        foc->hfi_cnt = 0;
+        foc->hfi_on = false;
+        foc->hfi_control = false;
         if (foc->motor_mode != MOTOR_POWER_ON)
         {
             foc->motor_mode = MOTOR_IDLE;
@@ -1436,125 +1439,6 @@ FOC_INLINE void Current_Loop_Core(FOC_t *foc)
     FOC_Harmonic_Comp(foc);
 }
 
-// ---------------------------------------------------------------------------
-// Passive HF-injection estimator (see HFI_VOLTAGE in foc_lib.h), after the current loop in
-// MOTOR_RUNNING. The per-period current step i[k] - i[k-1] carries the + + - - square wave
-// delayed by 1..2 periods (depending on when TIM1 latches the duty); its PWM_FREQ/4 phasor
-// (reference e^(-j pi k / 2): 1, -j, -1, j, no trig) is taken along and across the applied axis.
-// Only the perpendicular phasor's component in phase with the parallel one is used, so the
-// unknown delay drops out, and the slow fundamental averages to zero over each 4 periods.
-FOC_FAST_CODE void FOC_HFI_Update(FOC_t *foc)
-{
-    // Unfiltered currents: the measurement LPF attenuates the PWM_FREQ/4 component
-    float ia = (float)((int32_t)foc->adc_v_a - (int32_t)foc->adc_offset_a) * ADC_2_CURRENT;
-    float ib = (float)((int32_t)foc->adc_v_b - (int32_t)foc->adc_offset_b) * ADC_2_CURRENT;
-    float i_al, i_be;
-    Clarke_Transform(ia, ib, &i_al, &i_be);
-
-    if (foc->hfi_cnt == 0)
-    {
-        foc->hfi_idx = 0;
-        foc->hfi_delta = 0.0f;
-        foc->hfi_n = 0;
-        foc->hfi_zp[0] = foc->hfi_zp[1] = 0.0f;
-        foc->hfi_zc[0] = foc->hfi_zc[1] = 0.0f;
-        foc->hfi_zs[0] = foc->hfi_zs[1] = 0.0f;
-    }
-    else if (foc->hfi_cnt > HFI_DELAY) // The axis history is filled
-    {
-        float d_al = i_al - foc->hfi_ia_h;
-        float d_be = i_be - foc->hfi_ib_h;
-        float s, c;
-        Fast_Sin_Cos(foc->hfi_phi_h[HFI_DELAY - 1], &s, &c);
-        float par = d_al * c + d_be * s;
-        float perp = -d_al * s + d_be * c;
-        float pc = perp * foc->hfi_c2_h[HFI_DELAY - 1], ps = perp * foc->hfi_s2_h[HFI_DELAY - 1];
-
-        // Multiply by e^(-j pi idx / 2): one of 1, -j, -1, j
-        switch (foc->hfi_idx)
-        {
-        case 0:
-            foc->hfi_zp[0] += par;
-            foc->hfi_zc[0] += pc;
-            foc->hfi_zs[0] += ps;
-            break;
-        case 1:
-            foc->hfi_zp[1] -= par;
-            foc->hfi_zc[1] -= pc;
-            foc->hfi_zs[1] -= ps;
-            break;
-        case 2:
-            foc->hfi_zp[0] -= par;
-            foc->hfi_zc[0] -= pc;
-            foc->hfi_zs[0] -= ps;
-            break;
-        default:
-            foc->hfi_zp[1] += par;
-            foc->hfi_zc[1] += pc;
-            foc->hfi_zs[1] += ps;
-            break;
-        }
-
-        if (++foc->hfi_n >= HFI_WINDOW)
-        {
-            // Project the perpendicular phasors on the parallel one's direction. Then, as for an
-            // in-phase signal: perp ~ -K * par * sin(2 (delta - e)) over a full 0..pi sweep gives
-            // sc = |Zp| K sin(2e) / 2, ss = -|Zp| K cos(2e) / 2.
-            float zp = Fast_Sqrt(foc->hfi_zp[0] * foc->hfi_zp[0] + foc->hfi_zp[1] * foc->hfi_zp[1]);
-            if (zp > 1e-6f)
-            {
-                float ur = foc->hfi_zp[0] / zp, ui = foc->hfi_zp[1] / zp;
-                float sc = foc->hfi_zc[0] * ur + foc->hfi_zc[1] * ui;
-                float ss = foc->hfi_zs[0] * ur + foc->hfi_zs[1] * ui;
-                foc->hfi_k = 2.0f * Fast_Sqrt(sc * sc + ss * ss) / zp;
-                foc->hfi_err = 0.5f * Fast_Atan2(sc, -ss);
-                foc->hfi_phase = Fast_Atan2(foc->hfi_zp[1], foc->hfi_zp[0]);
-            }
-            else
-            {
-                foc->hfi_k = 0.0f;
-            }
-            // A step of +-A held 2 periods has a PWM_FREQ/4 phasor of sqrt(2)/2 * A per sample
-            foc->hfi_apar = zp * (1.41421356f / (float)HFI_WINDOW);
-            foc->hfi_windows++;
-            foc->hfi_n = 0;
-            foc->hfi_zp[0] = foc->hfi_zp[1] = 0.0f;
-            foc->hfi_zc[0] = foc->hfi_zc[1] = 0.0f;
-            foc->hfi_zs[0] = foc->hfi_zs[1] = 0.0f;
-        }
-    }
-
-    // Inject along control d-axis + delta; remember the applied alpha-beta axis
-    float s, c;
-    Fast_Sin_Cos(foc->hfi_delta, &s, &c);
-    const float v = (foc->hfi_idx < 2u) ? HFI_VOLTAGE : -HFI_VOLTAGE;
-    foc->v_d += v * c;
-    foc->v_q += v * s;
-    for (int j = HFI_DELAY - 1; j > 0; j--)
-    {
-        foc->hfi_phi_h[j] = foc->hfi_phi_h[j - 1];
-        foc->hfi_c2_h[j] = foc->hfi_c2_h[j - 1];
-        foc->hfi_s2_h[j] = foc->hfi_s2_h[j - 1];
-    }
-    foc->hfi_phi_h[0] = foc->theta + foc->ipark_adv * foc->omega + foc->hfi_delta;
-    foc->hfi_c2_h[0] = c * c - s * s; // Double angle: no second table look-up
-    foc->hfi_s2_h[0] = 2.0f * s * c;
-
-    foc->hfi_ia_h = i_al;
-    foc->hfi_ib_h = i_be;
-
-    foc->hfi_delta += PI / (float)HFI_WINDOW;
-    if (foc->hfi_delta >= PI)
-    {
-        foc->hfi_delta -= PI;
-    }
-    foc->hfi_idx = (foc->hfi_idx + 1u) & 3u;
-    if (foc->hfi_cnt <= HFI_DELAY) // Only "history filled" matters
-    {
-        foc->hfi_cnt++;
-    }
-}
-
 void FOC_Current_Loop_Update(FOC_t *foc)
 {
     if (foc == NULL)
@@ -1595,6 +1479,210 @@ static inline float Wrap_Pm_Pi(float a)
     return a;
 }
 
+// ---------------------------------------------------------------------------
+// HFI tracker (see HFI_VOLTAGE in foc_lib.h). Started at the eSMO's angle and speed.
+FOC_FAST_CODE static void HFI_Start(FOC_t *foc)
+{
+    foc->hfi_on = true;
+    foc->hfi_cnt = 0;
+    foc->hfi_idx = 0;
+    foc->hfi_fault_cnt = 0;
+    foc->hfi_theta = foc->smo.theta_est;
+    foc->hfi_omega = foc->smo.omega_est;
+    for (int j = 0; j < 4; j++)
+    {
+        foc->hfi_par[j] = 0.0f;
+        foc->hfi_perp[j] = 0.0f;
+    }
+}
+
+// One tracker step on this period's current sample: demodulate, then advance the PLL.
+// Returns false when the HF response or the track has been bad for HFI_FAULT_PERIODS.
+// Command k is applied during period k+1 (mid-period latch: partly k+2) and shows in the
+// current step i[k+2] - i[k+1]; the 4-period phasors absorb that timing.
+FOC_FAST_CODE static bool HFI_Track(FOC_t *foc)
+{
+    // Unfiltered currents: the measurement LPF attenuates the PWM_FREQ/4 component
+    float ia = (float)((int32_t)foc->adc_v_a - (int32_t)foc->adc_offset_a) * ADC_2_CURRENT;
+    float ib = (float)((int32_t)foc->adc_v_b - (int32_t)foc->adc_offset_b) * ADC_2_CURRENT;
+    float i_al, i_be;
+    Clarke_Transform(ia, ib, &i_al, &i_be);
+
+    float w = foc->hfi_omega;
+    if (foc->hfi_cnt > HFI_DELAY) // The axis history is filled
+    {
+        float d_al = i_al - foc->hfi_ia_h;
+        float d_be = i_be - foc->hfi_ib_h;
+        float s, c;
+        Fast_Sin_Cos(foc->hfi_phi_h[HFI_DELAY - 1], &s, &c);
+        const uint32_t m = foc->hfi_idx;
+        foc->hfi_par[m] = d_al * c + d_be * s;
+        foc->hfi_perp[m] = -d_al * s + d_be * c;
+    }
+    if (foc->hfi_cnt > HFI_DELAY + 4u) // All 4 slots hold real steps
+    {
+        // Phasors with the reference e^(-j pi m / 2) = 1, -j, -1, j for slots m = 0..3
+        const float *p = foc->hfi_par, *q = foc->hfi_perp;
+        float zp_re = p[0] - p[2], zp_im = p[3] - p[1];
+        float zq_re = q[0] - q[2], zq_im = q[3] - q[1];
+        float zp2 = zp_re * zp_re + zp_im * zp_im;
+        foc->hfi_zp = Fast_Sqrt(zp2);
+
+        // eps = HFI_K * sin(2 e) -> e ~ eps / (2 HFI_K)
+        float e = (zp2 > 1e-6f) ? (zq_re * zp_re + zq_im * zp_im) / zp2 * (0.5f / HFI_K) : 0.0f;
+        foc->hfi_err = e;
+
+        if (foc->hfi_zp < HFI_ZP_MIN || fabsf(e) > HFI_ERR_MAX)
+        {
+            if (++foc->hfi_fault_cnt >= HFI_FAULT_PERIODS)
+            {
+                return false;
+            }
+        }
+        else
+        {
+            foc->hfi_fault_cnt = 0;
+        }
+
+        // PLL (forward Euler, integrator = speed estimate)
+        e = CONSTRAIN(e, -HFI_ERR_MAX, HFI_ERR_MAX);
+        foc->hfi_omega = CONSTRAIN(foc->hfi_omega + HFI_PLL_KI * foc->sampling_time * e,
+                                   -ESMO_OMEGA_MAX, ESMO_OMEGA_MAX);
+        w = foc->hfi_omega + HFI_PLL_KP * e;
+    }
+    foc->hfi_theta = Wrap_Once(foc->hfi_theta + w * foc->sampling_time);
+
+    foc->hfi_ia_h = i_al;
+    foc->hfi_ib_h = i_be;
+    if (foc->hfi_cnt < HFI_WARMUP)
+    {
+        foc->hfi_cnt++;
+    }
+    return true;
+}
+
+// Add the square wave along hfi_theta (after the current controller) and remember the
+// alpha-beta axis it is applied on (the inverse Park adds ipark_adv * omega to every voltage)
+FOC_FAST_CODE static void HFI_Inject(FOC_t *foc)
+{
+    float delta = foc->hfi_theta - foc->theta; // Both in [0, 2pi)
+    if (delta < 0.0f)
+    {
+        delta += TWO_PI;
+    }
+    float s, c;
+    Fast_Sin_Cos(delta, &s, &c);
+    const float v = (foc->hfi_idx < 2u) ? HFI_VOLTAGE : -HFI_VOLTAGE;
+    foc->v_d += v * c;
+    foc->v_q += v * s;
+
+    for (int j = HFI_DELAY - 1; j > 0; j--)
+    {
+        foc->hfi_phi_h[j] = foc->hfi_phi_h[j - 1];
+    }
+    foc->hfi_phi_h[0] = Wrap_Once(foc->hfi_theta + foc->ipark_adv * foc->omega);
+    foc->hfi_idx = (foc->hfi_idx + 1u) & 3u;
+}
+
+// Closed-loop step with the eSMO <-> HFI switch (MOTOR_RUNNING, foc->hfi_enable).
+// The eSMO runs every period; its lock flag only matters while it is in control.
+FOC_FAST_CODE static void FOC_Current_Loop_HFI(FOC_t *foc)
+{
+    Clarke_Transform(foc->i_a, foc->i_b, &(foc->i_alpha), &(foc->i_beta));
+    const bool smo_locked = SMO_Update(&(foc->smo), foc->v_bus, foc->v_alpha, foc->v_beta,
+                                       foc->i_alpha, foc->i_beta);
+
+    if (foc->hfi_on && !HFI_Track(foc))
+    {
+        if (foc->hfi_control)
+        {
+            foc->hfi_fault = true;
+            FOC_Coast(foc); // No angle source left at this speed
+            return;
+        }
+        HFI_Start(foc); // Not in control: restart from the eSMO
+    }
+
+    if (!foc->hfi_control)
+    {
+        if (!smo_locked)
+        {
+            FOC_Coast(foc); // As in Current_Loop_Core
+            return;
+        }
+        const float w = fabsf(foc->smo.omega_est);
+        if (!foc->hfi_on && w < HFI_OMEGA_ON)
+        {
+            HFI_Start(foc);
+        }
+        else if (foc->hfi_on && w > 1.1f * HFI_OMEGA_ON)
+        {
+            foc->hfi_on = false;
+        }
+        else if (foc->hfi_takeover && foc->hfi_on && foc->hfi_cnt >= HFI_WARMUP && w < HFI_OMEGA_LOW)
+        {
+            if (fabsf(Wrap_Pm_Pi(foc->smo.theta_est - foc->hfi_theta)) < HFI_AGREE_ANGLE)
+            {
+                // Take over; the offset keeps the control angle continuous and then decays
+                foc->angle_offset = Wrap_Pm_Pi(Wrap_Once(foc->smo.theta_est + foc->angle_offset) - foc->hfi_theta);
+                foc->hfi_control = true;
+                foc->hfi_agree_cnt = 0;
+                foc->hfi_rev_cnt = 0;
+            }
+            else
+            {
+                // The tracker disagrees with the still-trusted eSMO (e.g. locked on the wrong
+                // pole): re-seed it rather than hand it the motor
+                HFI_Start(foc);
+            }
+        }
+    }
+    else
+    {
+        // Wrong-pole lock: the rotor turns against rotor_dir (see HFI_REVERSE_OMEGA)
+        const float dir = (foc->rotor_dir == NORMAL_DIRECTION) ? 1.0f : -1.0f;
+        foc->hfi_rev_cnt = (dir * foc->hfi_omega < -HFI_REVERSE_OMEGA) ? foc->hfi_rev_cnt + 1u : 0u;
+        if (foc->hfi_rev_cnt >= HFI_REVERSE_PERIODS)
+        {
+            foc->hfi_fault = true;
+            FOC_Coast(foc);
+            return;
+        }
+
+        // Back to the eSMO once it is locked and agrees with the tracker above HFI_OMEGA_UP
+        const float d = Wrap_Pm_Pi(foc->smo.theta_est - foc->hfi_theta);
+        const bool agree = smo_locked && fabsf(foc->hfi_omega) > HFI_OMEGA_UP &&
+                           fabsf(d) < HFI_AGREE_ANGLE &&
+                           fabsf(foc->smo.omega_est - foc->hfi_omega) < 0.2f * fabsf(foc->hfi_omega);
+        foc->hfi_agree_cnt = agree ? foc->hfi_agree_cnt + 1u : 0u;
+        if (foc->hfi_agree_cnt >= HFI_AGREE_PERIODS)
+        {
+            foc->angle_offset = Wrap_Pm_Pi(Wrap_Once(foc->hfi_theta + foc->angle_offset) - foc->smo.theta_est);
+            foc->hfi_control = false;
+        }
+    }
+
+    // Active source plus the decaying switch offset (offset in [-pi, pi]: one wrap)
+    foc->angle_offset = Slew_To(foc->angle_offset, 0.0f, ANGLE_BLEND_RATE * foc->sampling_time);
+    if (foc->hfi_control)
+    {
+        foc->theta = Wrap_Once(foc->hfi_theta + foc->angle_offset);
+        foc->omega = foc->hfi_omega;
+    }
+    else
+    {
+        foc->theta = Wrap_Once(foc->smo.theta_est + foc->angle_offset);
+        foc->omega = foc->smo.omega_est;
+    }
+
+    FOC_Current_Control(foc);
+    FOC_Harmonic_Comp(foc);
+    if (foc->hfi_on)
+    {
+        HFI_Inject(foc);
+    }
+}
+
 // Speed loop (FOC_SPEED_CONTROL, MOTOR_RUNNING), every SPEED_CTRL_DIVIDER periods.
 // Works in the rotation-direction frame (speed_ref, speed_ref_ramp, error and torque all
 // positive = in rotor_dir), so a single clamp keeps it motoring only: the output and the
@@ -1612,7 +1700,7 @@ FOC_FAST_CODE static void FOC_Speed_Control(FOC_t *foc)
     const float target = (foc->speed_ref > 0.0f) ? foc->speed_ref : 0.0f;
     foc->speed_ref_ramp = Slew_To(foc->speed_ref_ramp, target, SPEED_REF_SLEW * TS_SPEED);
 
-    float iq = PI_Step(&(foc->speed_ctrl), foc->speed_ref_ramp - dir * foc->smo.omega_est);
+    float iq = PI_Step(&(foc->speed_ctrl), foc->speed_ref_ramp - dir * foc->omega); // Active estimator (eSMO or HFI)
     if (iq < 0.0f)
     {
         iq = 0.0f;
@@ -1666,6 +1754,8 @@ FOC_FAST_CODE void FOC_BLDC_Startup_Update(FOC_t *foc)
         foc->startup_omega = 0.0f;
         foc->angle_offset = 0.0f;
         foc->bemf_counter = 0;
+        foc->hfi_on = false;
+        foc->hfi_control = false;
         foc->theta = 0.0f;
         foc->omega = 0.0f;
         foc->id_ref = 0.0f;
