@@ -216,6 +216,23 @@
 #define INJECTION_OMEGA (TWO_PI * INJECTION_FREQ) // Injection angular frequency (rad/s)
 
 // ---------------------------------------------------------------------------
+// Passive HF-injection estimator (FOC_HFI_Update, MOTOR_RUNNING only, never steers foc->theta).
+// A +-HFI_VOLTAGE square wave at PWM_FREQ/4 (sign held 2 periods: + + - -) is added along an
+// axis offset by delta from the control d-axis; delta sweeps 0..pi once per HFI_WINDOW periods.
+// Not PWM_FREQ/2: TIM1 takes a new duty mid-period, so a sign flipped every period cancels
+// within each sampling interval (bench 2026-10-27: HF step 0.13 A instead of ~1.2 A).
+// The per-period current step (unfiltered currents) is projected on the applied axis and
+// correlated with the PWM_FREQ/4 reference; normalising by the parallel phasor makes the result
+// independent of where in the period the duty changes. The perpendicular part ~ sin(2(delta - e))
+// gives the saliency amplitude and e = rotor d-axis (saliency minimum) minus control angle, mod pi.
+// At L ~ 6.4 uH, 0.075 V gives ~0.6 A per period, +-0.6 A ripple.
+#ifndef HFI_VOLTAGE
+#define HFI_VOLTAGE 0.075f // Square-wave amplitude (V)
+#endif
+#define HFI_WINDOW 2000u  // Periods per estimate (0.1 s at 20 kHz, multiple of 4); delta covers 0..pi
+#define HFI_DELAY 2u      // Periods from the command to the current step it causes (axis projection)
+
+// ---------------------------------------------------------------------------
 // FOC control parameters
 #define VD_MAX (V_RATED * ONE_OVER_SQRT3)                                  // Maximum D-axis voltage (V)
 #define CURRENT_CONTROL_F_BANDWIDTH 1000.0f // Default current control bandwidth (Hz). Fixed, not PWM_FREQ/10:
@@ -236,8 +253,10 @@
 #define KI_SPEED (KP_SPEED * SPEED_CTRL_BANDWIDTH * 0.25f)                 // Speed controller integral gain (PI zero at bandwidth/4)
 #define SPEED_REF_SLEW 2000.0f                                             // Speed reference ramp (rad/s^2 el)
 #ifndef V_BUS_MIN
-#define V_BUS_MIN 8.0f                                                     // Minimum bus voltage to calibrate or start (V): supply off/low
+#define V_BUS_MIN 8.0f                                                     // Minimum bus voltage to calibrate or start (V): supply off/low;
+                                                                           // also the run-time under-voltage trip (coast, vbus_uv_fault)
 #endif
+#define V_BUS_UV_PERIODS 10u                                               // Consecutive low samples before the under-voltage trip (0.5 ms at 20 kHz)
 #define CAL_PARAM_TOL 4.0f                                                 // Calibrated Rs/Ld/Lq accepted within RS,LS / tol .. * tol
 #ifndef V_BUS_MAX
 #define V_BUS_MAX 18.0f                                                   // Bus over-voltage trip (V): coast. Above a full 4S pack (16.8 V)
@@ -402,6 +421,8 @@ typedef struct
     float speed_ref_ramp;  // speed_ref after the SPEED_REF_SLEW ramp (what the speed PI tracks), in rotor_dir
     uint16_t speed_div;    // Current-loop periods since the last speed-loop update
     bool vbus_fault;       // Set when the bus over-voltage trip (V_BUS_MAX) coasted the drive
+    bool vbus_uv_fault;    // Set when the bus under-voltage trip (V_BUS_MIN while driving) coasted the drive
+    uint32_t vbus_uv_cnt;  // Consecutive periods below V_BUS_MIN with the outputs on
     float harm_p[2], harm_n[2]; // 6x harmonic integrators (+6 / -6 sequence frames), volts
     float harm_rp[2], harm_rn[2]; // Their phase-compensation phasors (unit), refreshed at 1 kHz
     uint16_t harm_div;     // Current-loop periods since the last phasor refresh
@@ -419,6 +440,7 @@ typedef struct
     uint32_t inj_n; // Injection round counter
     bool inj_start_flag;
     bool inj_fault; // Set when injection aborted on over-current
+    float inj_angle; // Injection frame angle (rad el, 0..2pi): 0 for Rs/Ld/Lq, swept by the saliency test
     float rs_low_vd_sum, rs_low_id_sum; // Two-point Rs: sums recorded at INJECTION_VOLTAGE_RS_LOW
     uint16_t adc_v_a_buff[INJECTION_ROUNDS], adc_v_b_buff[INJECTION_ROUNDS];
     float i_a_buff[INJECTION_ROUNDS], i_b_buff[INJECTION_ROUNDS];
@@ -427,6 +449,24 @@ typedef struct
     float id_inj_buff[INJECTION_ROUNDS]; // Buffer for measured currents
     float iq_inj_buff[INJECTION_ROUNDS];
     uint32_t pwm_a_buff[INJECTION_ROUNDS], pwm_b_buff[INJECTION_ROUNDS], pwm_c_buff[INJECTION_ROUNDS];
+
+    // Passive HFI estimator (see HFI_VOLTAGE). hfi_enable is written by the application;
+    // the rest is ISR state and the latched results of the last complete window.
+    bool hfi_enable;
+    uint32_t hfi_cnt;               // Periods since (re)start, saturating; history valid from HFI_DELAY
+    uint32_t hfi_idx;               // Square-wave phase 0..3 (sign + for 0, 1)
+    float hfi_delta;                // Injection axis offset from the control d-axis (rad, 0..pi)
+    float hfi_delta_h[HFI_DELAY];   // delta of the last HFI_DELAY periods ([0] = newest)
+    float hfi_phi_h[HFI_DELAY];     // Applied injection axis angle (alpha-beta) of the last HFI_DELAY periods
+    float hfi_ia_h, hfi_ib_h;       // Unfiltered alpha/beta currents of the previous sample
+    uint32_t hfi_n;                 // Samples in the current window
+    float hfi_zp[2];                // Window sums (complex, PWM_FREQ/4 reference): par
+    float hfi_zc[2], hfi_zs[2];     //   perp * cos(2 delta), perp * sin(2 delta)
+    float hfi_k;                    // Result: saliency signal |perp| / par amplitude (-)
+    float hfi_err;                  // Result: rotor d-axis minus control angle (rad, mod pi, -pi/2..pi/2)
+    float hfi_apar;                 // Result: HF current step per period along the axis (A)
+    float hfi_phase;                // Result: phase of the par phasor (rad): timing diagnostic
+    uint32_t hfi_windows;           // Completed windows
 
     // Angle used by the Park / inverse Park transforms, set by the state machine:
     // align angle, forced angle, blended angle or observer angle. The observer's
@@ -464,6 +504,8 @@ extern "C"
     void FOC_BLDC_Parameter_Measurement_Update(FOC_t *foc);
     void FOC_BLDC_Parameter_Calculation_Resistance(FOC_t *foc);
     void FOC_BLDC_Parameter_Calculation_Inductance(FOC_t *foc);
+    bool FOC_BLDC_Saliency_Point(const FOC_t *foc, float *L_axis, float *cross_re, float *cross_im);
+    void FOC_HFI_Update(FOC_t *foc);
 
     // Trigonometric functions: table look-up (1024 samples/turn) + linear interpolation.
     // Frameless fast path for angles in [0, 2pi); other angles are wrapped first.

@@ -13,7 +13,7 @@ A host C compiler: gcc from MSYS2 (UCRT64), MinGW-w64 or WSL. Check with `gcc --
 
 ```bash
 mkdir -p build-sim
-for t in startup_sim esmo_sim calib_sim svpwm_check pi_windup math_check normalize_check speed_sim; do
+for t in startup_sim esmo_sim calib_sim saliency_sim svpwm_check pi_windup math_check normalize_check speed_sim; do
   gcc -O2 -std=gnu99 -I Lib/foc-lib Lib/foc-lib/foc_lib.c tools/sim/$t.c -lm -o build-sim/$t
 done
 ```
@@ -41,6 +41,9 @@ unless marked otherwise.
 | `startup_sim` | Whole drive: ADC (quantised, noisy) → `FOC_Update` → SVPWM duties applied one period later → PMSM dq model + inertia + friction + fan load. Prints state transitions, handover metrics, closed-loop angle error | Heavy load: RAMP→TRANSITION→RUNNING, peak 3.3 A, ~1 deg current-vector step per period, angle error ~0.5 deg |
 | `esmo_sim` | eSMO alone on a speed-imposed PMSM (forward, reverse, ±30 % Rs/Ls, IPM, current LPF) | 6 lines with `drops=0`; 0.03–0.9 deg |
 | `calib_sim` | Rs / Ld / Lq calibration on a blocked rotor. Arg: Lq/Ld ratio | Rs 0.0220 (true 0.0220); Ld 8.1 uH for 7 uH. (The blocked rotor cannot show the rotor-alignment swing that `RS_ALIGN_ROUNDS` handles on the bench.) |
+| `speed_sim` (passive HFI) | Env `HFI=<t_on s>` enables `FOC_HFI_Update` in RUNNING and prints each 0.1 s window (k, err, apar) next to the TRUE rotor-minus-control angle; env `VDT`/`I0` add dead time; env `HALF=f` latches each new duty a fraction f into the period (0.5 = mid-period, as TIM1 on the bench) | `HALF=0.5 HFI=1.5 ... 0.002 1e-7 1.33 -1 5.5 1 0.63e-3 7`: k 0.136-0.151 (theory 0.142), apar 0.32 A, err within 1.3-2 deg of true; also `HALF` 0 / 0.3 and fan load (iq 11.7 A) + `VDT=0.02`. Note `HALF=0.5` alone raises the eSMO error to 2.9 deg (delay comps tuned for `HALF=0`) |
+| `speed_sim` (bus sag) | Env `VSAG=<t s>`: bus falls 12 -> 6 V over 50 ms from t (current-limited supply) | `VSAG=4.1 J=1.2e-4 HALF=0.5 HFI=1.5 ... 0.002 2.6e-7 1.33 -1 4.4 1 0.63e-3 7`: -> IDLE at 4.134 s (~7.96 V), no current spike |
+| `saliency_sim` | Saliency sweep (`FOC_BLDC_Saliency_Point` at 24 angles + the `Src/freertos.c` fit) on a blocked salient rotor. Args: Lq/Ld ratio, rotor d-axis angle (deg el); env `VDT`/`I0` as `calib_sim` | `1.2 20`: min-L axis 19.9 deg, A2 0.57 uH (L1 0.7 uH true), A1 0.003 uH; `1.0 0` (non-salient): A2 0.005 uH |
 | `svpwm_check` | Applied vs commanded voltage of `SVPWM_Modulation` over all angles | gain 0.9995–1.0005, angle error < 0.03 deg |
 | `pi_windup` | `PI_Update` back-calculation anti-windup on an RL plant under saturation | integral 6.9 V at 50 ms, settles 1.2 ms after saturation ends |
 | `math_check` | `Normalize_Angle`, `Fast_Sin/Cos/Sin_Cos`, `Fast_Atan2`, `Fast_Sqrt` vs double libm, incl. edge cases | sin/cos < 5e-6 for |a| <= 200; atan2 < 2e-6 rad; sqrt exact |

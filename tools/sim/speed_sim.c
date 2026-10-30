@@ -12,6 +12,12 @@
  *   LD_EST, RS_EST   controller's (calibrated) Ld / Rs differing from the plant
  *   XD       extra PWM periods of delay in the plant (unmodelled latency)
  *   J        rotor inertia (default 1.4e-5 kg m^2, from the bench acceleration)
+ *   HFI      time (s) to enable the passive HFI estimator; prints every window with the TRUE
+ *            rotor-minus-control angle averaged over the window
+ *   VDT, I0  inverter dead-time error per phase (V) with a soft knee (A), as in calib_sim
+ *   VSAG     time (s) at which the bus falls from 12 V to 6 V over 50 ms (supply current limit)
+ *   HALF     fraction of each period still driven by the previous command (0 = default
+ *            one-period delay; 0.5 = new duty latched mid-period, 1.5-period latency)
  * Example: HD=0.04 HP=0.02 ./speed_sim 0.002 1e-7 1 -1 5.5 1 0.63e-3 7
  */
 #include <stdio.h>
@@ -46,7 +52,7 @@ int main(int argc, char **argv)
     const double Ts = TS, Rs = RS, Ld = LS, Lq = LS * lq_ratio;
     const double psi = (argc > 7) ? atof(argv[7]) : FLUX_LINKAGE;   /* plant (real motor) flux */
     const double p = (argc > 8) ? atof(argv[8]) : POLE_PAIRS;       /* plant (real motor) pole pairs */
-    const double J = getenv("J") ? atof(getenv("J")) : 1.4e-5, B = 1e-6, vbus = 12.0;
+    const double J = getenv("J") ? atof(getenv("J")) : 1.4e-5, B = 1e-6; double vbus = 12.0;
     const int SUB = 40; const double h = Ts / SUB;
     const double A_PER_LSB = ADC_2_VOLT * V_2_CURRENT;
     srand(3); HD = getenv("HD") ? atof(getenv("HD")) : 0.0; HP = getenv("HP") ? atof(getenv("HP")) : 0.0;
@@ -73,9 +79,15 @@ int main(int argc, char **argv)
     double te_before = 0, wm_at_handover = 0, te_min_after = 1e9, te_max_after = -1e9, wm_min_after = 1e9;
     double cur_ang_prev = 0, max_cur_ang_jump = 0, err_sum = 0, id_sum = 0; int n_err = 0;
     double brake_peak = 0;
+    const double t_hfi = getenv("HFI") ? atof(getenv("HFI")) : -1;
+    const double t_sag = getenv("VSAG") ? atof(getenv("VSAG")) : -1;
+    const double vdt = getenv("VDT") ? atof(getenv("VDT")) : 0, i0 = getenv("I0") ? atof(getenv("I0")) : 0.05;
+    const double half = getenv("HALF") ? atof(getenv("HALF")) : 0; /* fraction of the period still on the old command */ uint32_t ha = PWM_RES / 2, hb = PWM_RES / 2, hc = PWM_RES / 2;
+    uint32_t hfi_windows = 0; double hfi_e_sum = 0, hfi_q_sum = 0; long hfi_e_n = 0;
 
     for (long k = 0; k * Ts < t_end; k++) {
         double t = k * Ts;
+        if (t_sag >= 0) vbus = (t < t_sag) ? 12.0 : fmax(6.0, 12.0 - (t - t_sag) * 120.0); /* VSAG: 12 -> 6 V in 50 ms */
         /* ---- sample currents (ADC) ---- */
         double c = cos(th), s = sin(th);
         double ial = id * c - iq * s, ibe = id * s + iq * c;
@@ -88,7 +100,17 @@ int main(int argc, char **argv)
         if (t_coast > 0 && t >= t_coast && t - Ts < t_coast) FOC_Coast(&foc);
 
         if (t >= 3.0) foc.speed_ref = 2500.0f;
+        if (t_hfi >= 0 && t >= t_hfi && foc.motor_mode == MOTOR_RUNNING) foc.hfi_enable = true;
         FOC_Update(&foc);
+        if (foc.hfi_enable) {
+            hfi_e_sum += wrap(th - foc.theta); hfi_q_sum += iq; hfi_e_n++;
+            if (foc.hfi_windows != hfi_windows) {
+                hfi_windows = foc.hfi_windows;
+                printf("      HFI t=%.2f  k %.4f  err %+6.2f deg  apar %.3f A | true rotor-control %+6.2f deg, iq %.2f A, w %.0f\n",
+                       t, foc.hfi_k, foc.hfi_err * 180 / M_PI, foc.hfi_apar, hfi_e_sum / hfi_e_n * 180 / M_PI, hfi_q_sum / hfi_e_n, wm * p);
+                hfi_e_sum = hfi_q_sum = 0; hfi_e_n = 0;
+            }
+        }
         if (k % 1000 == 0) printf("      t=%.1f mode=%s ref=%.0f est=%.0f true=%.0f iq_ref=%.2f iq=%.2f id=%.2f\n", t, mode_name(foc.motor_mode), foc.speed_ref_ramp, foc.smo.omega_est, wm * p, foc.iq_ref, iq, id);
 
         if (foc.motor_mode != last_mode) {
@@ -102,11 +124,22 @@ int main(int argc, char **argv)
         /* ---- plant over [t, t+Ts] with the duties computed in the PREVIOUS period ---- */
         double da = (double)pa / PWM_RES, db = (double)pb / PWM_RES, dc = (double)pc / PWM_RES;
         double va = da * vbus, vb = db * vbus, vc = dc * vbus;
+        /* HALF=f: duties change a fraction f into the period (f = 0.5: 1.5-period latency): the first part of [t, t+Ts] still
+           carries the command from two steps back */
+        double va0 = (double)ha / PWM_RES * vbus, vb0 = (double)hb / PWM_RES * vbus, vc0 = (double)hc / PWM_RES * vbus;
+        if (!half) { va0 = va; vb0 = vb; vc0 = vc; }
+        double v_al0 = (2 * va0 - vb0 - vc0) / 3.0, v_be0 = (vb0 - vc0) / sqrt(3.0);
+        if (vdt > 0) { /* dead-time error from the phase currents at the period start */
+            double cc = cos(th), ss = sin(th), pia = id * cc - iq * ss, pbe = id * ss + iq * cc;
+            double pib = -0.5 * pia + 0.8660254037844386 * pbe, pic = -pia - pib;
+            va -= vdt * tanh(pia / i0); vb -= vdt * tanh(pib / i0); vc -= vdt * tanh(pic / i0);
+        }
         double v_al = (2 * va - vb - vc) / 3.0, v_be = (vb - vc) / sqrt(3.0);
         for (int j = 0; j < SUB; j++) {
             double cc = cos(th), ss = sin(th), we = p * wm;
             if (bridge_on) {
-                double ud = v_al * cc + v_be * ss, uq = -v_al * ss + v_be * cc;
+                double xal = (j < SUB * half) ? v_al0 : v_al, xbe = (j < SUB * half) ? v_be0 : v_be;
+                double ud = xal * cc + xbe * ss, uq = -xal * ss + xbe * cc;
                 double did = (ud - Rs * id + we * Lq * iq) / Ld, diq = (uq - Rs * iq - we * Ld * id - we * psi) / Lq;
                 /* 5th/7th back-EMF harmonics appear as a 6x disturbance in d/q (HD = fraction of fundamental) */
                 /* D = we*psi*(HD*exp(-j6th) + HP*exp(+j6th)): -6 and +6 sequence */
@@ -122,6 +155,7 @@ int main(int argc, char **argv)
             th = wrap(th + h * p * wm);
         }
         /* duties computed now take effect next period */
+        ha = pa; hb = pb; hc = pc;
         if (xdelay) { pa = qa; pb = qb; pc = qc; qa = foc.pwm_a; qb = foc.pwm_b; qc = foc.pwm_c; }
         else { pa = foc.pwm_a; pb = foc.pwm_b; pc = foc.pwm_c; }
 #if 1 /* MOTOR_STARTUP_TRANSITION exists in this foc_lib */

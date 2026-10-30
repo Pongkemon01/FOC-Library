@@ -30,6 +30,7 @@
 #include "tim.h"
 #include "adc.h"
 #include "foc_lib.h"
+#include <math.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -44,6 +45,15 @@
 #endif
 #define RUN_FOC_TEST 1 // 0: stop after calibration (current-sign diagnostic), 1: run the 5 s speed test
 #define RUN_DIRECTION NORMAL_DIRECTION // Speed test direction: NORMAL_DIRECTION or REVERSE_DIRECTION
+#define RUN_SALIENCY_SWEEP 1 // 1: after calibration, Ld-type HF injection at SWEEP_POINTS angles over 0..2pi
+#define SWEEP_POINTS 24
+#define RUN_HFI_PASSIVE 1 // 1: passive HFI estimator on from HFI_ON_MS in the speed test (control unchanged)
+#define HFI_ON_MS 1500
+#define LOAD_STAIRS 1 // 1: gentle staircase for a propeller load (8 s): 1500 rad/s el, ramp 500 rad/s^2 to
+                      // 2000, hold, ramp 250 rad/s^2 to 2500, hold. The bench 12 V 5 A supply collapses at
+                      // ~20 W (2026-10-30), so no 3000 step and slow ramps (less inertia current).
+                      // 0: the usual 1500 -> 2500 at 3 s
+#define TEST_I_MAX 8.0f // Speed-test current cap (A): iq_ref and the speed PI output (default I_RATED)
 
 /* USER CODE END PD */
 
@@ -438,6 +448,72 @@ void StartDefaultTask(void *argument)
 
     FOC_Recalc_Params(&foc);
 
+#if RUN_SALIENCY_SWEEP
+    // Saliency map (stationary rotor, left where the Rs run aligned it: d-axis near 0 within a
+    // cogging step). The same 1 kHz INJECTION_VOLTAGE sine as the Ld run, applied along each angle;
+    // no DC, so no mean torque. Fit L(phi) = A0 + A1 cos(phi - p1) + A2 cos(2 phi - 2 p2):
+    // A2 is the saliency (expect min L at phi ~ 0 / pi), A1 should be ~0 (rotor did not move).
+    {
+        static float sw_L[SWEEP_POINTS], sw_xr[SWEEP_POINTS], sw_xi[SWEEP_POINTS];
+        bool sw_ok = true;
+        printf("Saliency sweep (%d points, 1 kHz, %f V):\r\n  deg  L_axis(nH)  cross_re(x1e4)  cross_im(x1e4)\r\n",
+               SWEEP_POINTS, (double)INJECTION_VOLTAGE);
+        for (int k = 0; k < SWEEP_POINTS && sw_ok; k++)
+        {
+            foc.inj_angle = (float)k * (TWO_PI / SWEEP_POINTS);
+            foc.foc_mode = FOC_CALIBRATION;
+            foc.motor_mode = MOTOR_ESTIMATION_LD;
+            foc.inj_fault = false;
+            foc.inj_start_flag = true;
+            while (foc.inj_start_flag)
+                osDelay(1);
+            sw_ok = !foc.inj_fault && FOC_BLDC_Saliency_Point(&foc, &sw_L[k], &sw_xr[k], &sw_xi[k]);
+            if (sw_ok)
+                printf("  %3d  %6d  %6d  %6d\r\n", k * 360 / SWEEP_POINTS, (int)(sw_L[k] * 1e9f),
+                       (int)(sw_xr[k] * 1e4f), (int)(sw_xi[k] * 1e4f));
+        }
+        foc.inj_angle = 0.0f;
+
+        if (!sw_ok)
+            printf("  !! sweep aborted (over-current or no current)\r\n");
+        else
+        {
+            float s0 = 0, c1 = 0, s1 = 0, c2 = 0, s2 = 0, xc2 = 0, xs2 = 0;
+            for (int k = 0; k < SWEEP_POINTS; k++)
+            {
+                float p = (float)k * (TWO_PI / SWEEP_POINTS);
+                s0 += sw_L[k];
+                c1 += sw_L[k] * cosf(p);
+                s1 += sw_L[k] * sinf(p);
+                c2 += sw_L[k] * cosf(2.0f * p);
+                s2 += sw_L[k] * sinf(2.0f * p);
+                xc2 += sw_xr[k] * cosf(2.0f * p);
+                xs2 += sw_xr[k] * sinf(2.0f * p);
+            }
+            const float n = (float)SWEEP_POINTS;
+            float A0 = s0 / n, A1 = 2.0f * sqrtf(c1 * c1 + s1 * s1) / n, A2 = 2.0f * sqrtf(c2 * c2 + s2 * s2) / n;
+            float p2 = 0.5f * atan2f(s2, c2); // angle of max L (q-axis)
+            float X2 = 2.0f * sqrtf(xc2 * xc2 + xs2 * xs2) / n;
+
+            // Residual after the 0th..2nd harmonics: measurement noise floor
+            float res = 0.0f;
+            for (int k = 0; k < SWEEP_POINTS; k++)
+            {
+                float p = (float)k * (TWO_PI / SWEEP_POINTS);
+                float fit = A0 + 2.0f / n * (c1 * cosf(p) + s1 * sinf(p) + c2 * cosf(2.0f * p) + s2 * sinf(2.0f * p));
+                res += (sw_L[k] - fit) * (sw_L[k] - fit);
+            }
+            res = sqrtf(res / n);
+
+            printf("  fit: L0 %d nH, A2 %d nH (min-L axis %d deg el, mod 180), A1 %d nH, residual rms %d nH\r\n",
+                   (int)(A0 * 1e9f), (int)(A2 * 1e9f), (int)((p2 + 0.5f * PI) * (180.0f / PI)) % 180,
+                   (int)(A1 * 1e9f), (int)(res * 1e9f));
+            printf("  -> Ld ~ %d nH, Lq ~ %d nH; cross-axis 2nd harmonic %d x1e-4 of the axis current\r\n",
+                   (int)((A0 - A2) * 1e9f), (int)((A0 + A2) * 1e9f), (int)(X2 * 1e4f));
+        }
+    }
+#endif
+
 #if RUN_FOC_TEST
     printf("Starting FOC control...\r\n");
     // Speed test: 1500 rad/s el (~2050 rpm), stepped to 2500 (~3400 rpm) at t = 3 s; both below
@@ -452,10 +528,12 @@ void StartDefaultTask(void *argument)
     if (!FOC_Set_Direction(&foc, RUN_DIRECTION))
         printf("!! FOC_Set_Direction refused (bridge energized)\r\n");
     foc.speed_ref = 1500.0f;
+    foc.bldc.max_current = TEST_I_MAX;
+    PI_Set_Output_Limit(&foc.speed_ctrl, TEST_I_MAX);
     foc.motor_mode = MOTOR_IDLE;
     foc.foc_mode = FOC_SPEED_CONTROL;
 
-    // Log the drive state at ~50 Hz for 5 s (task context, never from the ISR). Integers only
+    // Log the drive state at ~50 Hz for 5 s (8 s with LOAD_STAIRS; task context, never from the ISR). Integers only
     // (rad/s, mV, mA) to keep printf's stack use low on this task's 512 B stack.
     // brk = TIM1 break flag: the IHM08M1 over-current comparator tripped (outputs latched off).
     // ia/ib are updated every ISR (id/iq freeze once the outputs are off): after a coast they
@@ -465,20 +543,45 @@ void StartDefaultTask(void *argument)
     const uint32_t t0 = osKernelGetTickCount();
     isr_cyc_max = 0;
     irq_cyc_max = 0;
-    printf("t_ms mode w_force w_ref w_est emf_mV lock cnt id_mA iq_mA ia_mA ib_mA vd_mV vq_mV vbus_mV brk moe isr_cyc irq_cyc\r\n");
+    // hfi_*: passive HFI results of the last 0.1 s window (k x1e4, err = rotor d-axis minus control
+    // angle in 0.1 deg el, apar = HF step per period along the axis in mA, ph = its phasor phase in deg
+    // (timing diagnostic), win = completed windows)
+    printf("t_ms mode w_force w_ref w_est emf_mV lock cnt id_mA iq_mA ia_mA ib_mA vd_mV vq_mV vbus_mV brk moe isr_cyc irq_cyc hfi_k hfi_err hfi_apar hfi_ph hfi_win\r\n");
     BLDC_Mode_t last_mode = foc.motor_mode;
+#if LOAD_STAIRS
+    for (int k = 0; k < 400; k++) // 8 s
+    {
+        uint32_t t_ms = osKernelGetTickCount() - t0;
+        // 1500 to 2.5 s; 500 rad/s^2 to 2000 at 3.5 s; hold to 4.5 s; 250 rad/s^2 to 2500 at 6.5 s; hold.
+        // Slower than the library's SPEED_REF_SLEW, so the library ramp just follows.
+        if (t_ms < 2500)
+            foc.speed_ref = 1500.0f;
+        else if (t_ms < 3500)
+            foc.speed_ref = 1500.0f + 0.5f * (float)(t_ms - 2500);
+        else if (t_ms < 4500)
+            foc.speed_ref = 2000.0f;
+        else if (t_ms < 6500)
+            foc.speed_ref = 2000.0f + 0.25f * (float)(t_ms - 4500);
+        else
+            foc.speed_ref = 2500.0f;
+#else
     for (int k = 0; k < 250; k++)
     {
         uint32_t t_ms = osKernelGetTickCount() - t0;
         if (t_ms >= 3000)
             foc.speed_ref = 2500.0f;
+#endif
+#if RUN_HFI_PASSIVE
+        if (t_ms >= HFI_ON_MS)
+            foc.hfi_enable = true;
+#endif
         // Handover message, printed here because FOC_Update runs in the ADC ISR (values are
         // up to one logger period after the handover)
         if (foc.motor_mode == MOTOR_RUNNING && last_mode != MOTOR_RUNNING)
             printf("*** Startup complete: handover to closed loop at speed %f rad/s, id = %f A, iq = %f A\r\n",
                    foc.omega, foc.id_ref, foc.iq_ref);
         last_mode = foc.motor_mode;
-        printf("%d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\r\n",
+        printf("%d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d",
                (int)t_ms, (int)foc.motor_mode, (int)foc.startup_omega,
                (int)foc.speed_ref_ramp, (int)foc.smo.omega_est, (int)(foc.smo.emf_magnitude * 1000.0f), (int)foc.smo.locked,
                (int)foc.bemf_counter, (int)(foc.i_d * 1000.0f), (int)(foc.i_q * 1000.0f),
@@ -486,13 +589,20 @@ void StartDefaultTask(void *argument)
                (int)(foc.v_d * 1000.0f), (int)(foc.v_q * 1000.0f), (int)(foc.v_bus * 1000.0f),
                (TIM1->SR & TIM_SR_BIF) ? 1 : 0, (TIM1->BDTR & TIM_BDTR_MOE) ? 1 : 0, (int)isr_cyc_last,
                (int)irq_cyc_last);
+        // Separate call: fewer varargs per printf on this task's 512 B stack
+        printf(" %d %d %d %d %d\r\n", (int)(foc.hfi_k * 1e4f), (int)(foc.hfi_err * (1800.0f / PI)),
+               (int)(foc.hfi_apar * 1000.0f), (int)(foc.hfi_phase * (180.0f / PI)), (int)foc.hfi_windows);
         osDelay(20);
     }
+    foc.hfi_enable = false;
     printf("ISR cycles: max %lu, budget %lu per period (%d Hz PWM)\r\n", (unsigned long)isr_cyc_max,
            (unsigned long)(SystemCoreClock / (uint32_t)PWM_FREQ), (int)PWM_FREQ);
     printf("IRQ cycles (handler entry to callback end): max %lu\r\n", (unsigned long)irq_cyc_max);
-    printf("Stopping FOC control... (vbus_fault = %d)\r\n", (int)foc.vbus_fault);
+    printf("Stopping FOC control... (vbus_fault = %d, vbus_uv_fault = %d)\r\n", (int)foc.vbus_fault,
+           (int)foc.vbus_uv_fault);
     foc.foc_mode = FOC_IDLE;
+    foc.bldc.max_current = I_RATED;
+    PI_Set_Output_Limit(&foc.speed_ctrl, I_RATED);
     // Coast check: the rotor is still spinning down here; ia/ib must stay ~0 with moe = 0
     for (int k = 0; k < 25; k++)
     {

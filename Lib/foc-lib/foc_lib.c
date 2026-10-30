@@ -951,6 +951,8 @@ void FOC_Init(FOC_t *foc, uint32_t pwm_res, uint32_t adc_offset)
     foc->speed_ref_ramp = 0.0f;
     foc->speed_div = 0;
     foc->vbus_fault = false;
+    foc->vbus_uv_fault = false;
+    foc->vbus_uv_cnt = 0;
     Harm_Reset(foc);
     foc->harm_rp[0] = foc->harm_rn[0] = 1.0f;
     foc->harm_rp[1] = foc->harm_rn[1] = 0.0f;
@@ -991,6 +993,9 @@ void FOC_Init(FOC_t *foc, uint32_t pwm_res, uint32_t adc_offset)
     foc->inj_n = 0;
     foc->inj_start_flag = false;
     foc->inj_fault = false;
+    foc->inj_angle = 0.0f;
+    foc->hfi_enable = false;
+    foc->hfi_cnt = 0;
 
     // Initialize PI controllers
     PI_Init(&(foc->id_ctrl), KP_I, KI_I, TS, VD_MAX);
@@ -1058,6 +1063,7 @@ FOC_FAST_CODE void FOC_Coast(FOC_t *foc)
     foc->omega = 0.0f;
     foc->foc_mode = FOC_IDLE;
     foc->motor_mode = MOTOR_IDLE;
+    foc->hfi_cnt = 0;
 
     PI_Reset(&(foc->id_ctrl));
     PI_Reset(&(foc->iq_ctrl));
@@ -1093,13 +1099,30 @@ FOC_FAST_CODE void FOC_Update(FOC_t *foc)
         foc->vbus_fault = true;
     }
 
+    // Bus under-voltage while driving (bench 2026-10-30: a current-limited supply sagged to 7.5 V
+    // and the bridge ended in the hardware over-current trip): coast and latch a fault after
+    // V_BUS_UV_PERIODS consecutive low samples, so one noisy ADC sample cannot trip it.
+    if (foc->outputs_enabled && foc->v_bus < V_BUS_MIN)
+    {
+        if (++foc->vbus_uv_cnt >= V_BUS_UV_PERIODS)
+        {
+            FOC_Coast(foc);
+            foc->inj_start_flag = false;
+            foc->vbus_uv_fault = true;
+        }
+    }
+    else
+    {
+        foc->vbus_uv_cnt = 0;
+    }
+
     // Main FOC state machine
     switch (foc->foc_mode)
     {
     case FOC_CALIBRATION: // Measure BLDC parameters
         FOC_BLDC_Parameter_Measurement_Update(foc);
-        // Injection is done in a fixed frame at standstill
-        foc->theta = 0.0f;
+        // Injection is done in a fixed frame at standstill (inj_angle: 0 except in the saliency sweep)
+        foc->theta = foc->inj_angle;
         foc->omega = 0.0f;
         foc->outputs_enabled = !foc->inj_fault;
         break;
@@ -1132,6 +1155,16 @@ FOC_FAST_CODE void FOC_Update(FOC_t *foc)
                 FOC_Speed_Control(foc);
             }
             Current_Loop_Core(foc);
+            // Passive HFI: adds the square wave to v_d/v_q, leaves foc->theta alone.
+            // Current_Loop_Core may have coasted (observer lost): then do nothing.
+            if (foc->hfi_enable && foc->motor_mode == MOTOR_RUNNING)
+            {
+                FOC_HFI_Update(foc);
+            }
+            else
+            {
+                foc->hfi_cnt = 0;
+            }
             break;
 
         default:
@@ -1150,6 +1183,7 @@ FOC_FAST_CODE void FOC_Update(FOC_t *foc)
         foc->v_d = 0.0f;
         foc->v_q = 0.0f;
         foc->outputs_enabled = false;
+        foc->hfi_cnt = 0;
         if (foc->motor_mode != MOTOR_POWER_ON)
         {
             foc->motor_mode = MOTOR_IDLE;
@@ -1401,6 +1435,125 @@ FOC_INLINE void Current_Loop_Core(FOC_t *foc)
 
     FOC_Current_Control(foc);
     FOC_Harmonic_Comp(foc);
+}
+
+// ---------------------------------------------------------------------------
+// Passive HF-injection estimator (see HFI_VOLTAGE in foc_lib.h), after the current loop in
+// MOTOR_RUNNING. The per-period current step i[k] - i[k-1] carries the + + - - square wave
+// delayed by 1..2 periods (depending on when TIM1 latches the duty); its PWM_FREQ/4 phasor
+// (reference e^(-j pi k / 2): 1, -j, -1, j, no trig) is taken along and across the applied axis.
+// Only the perpendicular phasor's component in phase with the parallel one is used, so the
+// unknown delay drops out, and the slow fundamental averages to zero over each 4 periods.
+FOC_FAST_CODE void FOC_HFI_Update(FOC_t *foc)
+{
+    // Unfiltered currents: the measurement LPF attenuates the PWM_FREQ/4 component
+    float ia = (float)((int32_t)foc->adc_v_a - (int32_t)foc->adc_offset_a) * ADC_2_CURRENT;
+    float ib = (float)((int32_t)foc->adc_v_b - (int32_t)foc->adc_offset_b) * ADC_2_CURRENT;
+    float i_al, i_be;
+    Clarke_Transform(ia, ib, &i_al, &i_be);
+
+    if (foc->hfi_cnt == 0)
+    {
+        foc->hfi_idx = 0;
+        foc->hfi_delta = 0.0f;
+        foc->hfi_n = 0;
+        foc->hfi_zp[0] = foc->hfi_zp[1] = 0.0f;
+        foc->hfi_zc[0] = foc->hfi_zc[1] = 0.0f;
+        foc->hfi_zs[0] = foc->hfi_zs[1] = 0.0f;
+    }
+    else if (foc->hfi_cnt > HFI_DELAY) // The axis history is filled
+    {
+        float d_al = i_al - foc->hfi_ia_h;
+        float d_be = i_be - foc->hfi_ib_h;
+        float s, c;
+        Fast_Sin_Cos(foc->hfi_phi_h[HFI_DELAY - 1], &s, &c);
+        float par = d_al * c + d_be * s;
+        float perp = -d_al * s + d_be * c;
+        float d = foc->hfi_delta_h[HFI_DELAY - 1];
+        Fast_Sin_Cos(2.0f * d, &s, &c);
+        float pc = perp * c, ps = perp * s;
+
+        // Multiply by e^(-j pi idx / 2): one of 1, -j, -1, j
+        switch (foc->hfi_idx)
+        {
+        case 0:
+            foc->hfi_zp[0] += par;
+            foc->hfi_zc[0] += pc;
+            foc->hfi_zs[0] += ps;
+            break;
+        case 1:
+            foc->hfi_zp[1] -= par;
+            foc->hfi_zc[1] -= pc;
+            foc->hfi_zs[1] -= ps;
+            break;
+        case 2:
+            foc->hfi_zp[0] -= par;
+            foc->hfi_zc[0] -= pc;
+            foc->hfi_zs[0] -= ps;
+            break;
+        default:
+            foc->hfi_zp[1] += par;
+            foc->hfi_zc[1] += pc;
+            foc->hfi_zs[1] += ps;
+            break;
+        }
+
+        if (++foc->hfi_n >= HFI_WINDOW)
+        {
+            // Project the perpendicular phasors on the parallel one's direction. Then, as for an
+            // in-phase signal: perp ~ -K * par * sin(2 (delta - e)) over a full 0..pi sweep gives
+            // sc = |Zp| K sin(2e) / 2, ss = -|Zp| K cos(2e) / 2.
+            float zp = Fast_Sqrt(foc->hfi_zp[0] * foc->hfi_zp[0] + foc->hfi_zp[1] * foc->hfi_zp[1]);
+            if (zp > 1e-6f)
+            {
+                float ur = foc->hfi_zp[0] / zp, ui = foc->hfi_zp[1] / zp;
+                float sc = foc->hfi_zc[0] * ur + foc->hfi_zc[1] * ui;
+                float ss = foc->hfi_zs[0] * ur + foc->hfi_zs[1] * ui;
+                foc->hfi_k = 2.0f * Fast_Sqrt(sc * sc + ss * ss) / zp;
+                foc->hfi_err = 0.5f * Fast_Atan2(sc, -ss);
+                foc->hfi_phase = Fast_Atan2(foc->hfi_zp[1], foc->hfi_zp[0]);
+            }
+            else
+            {
+                foc->hfi_k = 0.0f;
+            }
+            // A step of +-A held 2 periods has a PWM_FREQ/4 phasor of sqrt(2)/2 * A per sample
+            foc->hfi_apar = zp * (1.41421356f / (float)HFI_WINDOW);
+            foc->hfi_windows++;
+            foc->hfi_n = 0;
+            foc->hfi_zp[0] = foc->hfi_zp[1] = 0.0f;
+            foc->hfi_zc[0] = foc->hfi_zc[1] = 0.0f;
+            foc->hfi_zs[0] = foc->hfi_zs[1] = 0.0f;
+        }
+    }
+
+    // Inject along control d-axis + delta; remember the applied alpha-beta axis
+    float s, c;
+    Fast_Sin_Cos(foc->hfi_delta, &s, &c);
+    const float v = (foc->hfi_idx < 2u) ? HFI_VOLTAGE : -HFI_VOLTAGE;
+    foc->v_d += v * c;
+    foc->v_q += v * s;
+    for (int j = HFI_DELAY - 1; j > 0; j--)
+    {
+        foc->hfi_phi_h[j] = foc->hfi_phi_h[j - 1];
+        foc->hfi_delta_h[j] = foc->hfi_delta_h[j - 1];
+    }
+    foc->hfi_phi_h[0] = foc->theta + foc->ipark_adv * foc->omega + foc->hfi_delta;
+    foc->hfi_delta_h[0] = foc->hfi_delta;
+
+    foc->hfi_ia_h = i_al;
+    foc->hfi_ib_h = i_be;
+
+    foc->hfi_delta += PI / (float)HFI_WINDOW;
+    if (foc->hfi_delta >= PI)
+    {
+        foc->hfi_delta -= PI;
+    }
+    foc->hfi_idx = (foc->hfi_idx + 1u) & 3u;
+    if (foc->hfi_cnt < 0xFFFFFFFFu)
+    {
+        foc->hfi_cnt++;
+    }
 }
 
 void FOC_Current_Loop_Update(FOC_t *foc)
@@ -1801,6 +1954,56 @@ void FOC_BLDC_Parameter_Calculation_Inductance(FOC_t *foc)
 }
 
 // ---------------------------------------------------------------------------
+// Saliency sweep: one point, after an MOTOR_ESTIMATION_LD run at foc->inj_angle.
+// L_axis: apparent inductance along the injection axis, Ld*Lq / (L0 - L1*cos(2*d)) with
+// d = rotor d-axis minus inj_angle, L0 = (Ld+Lq)/2, L1 = (Ld-Lq)/2 (R neglected).
+// cross = I_perp / I_axis (complex): ~ -L1*sin(2*d) / (L0 - L1*cos(2*d)), mostly real.
+// This is the signal a pulsating HF-injection observer would track. Returns false if no current.
+bool FOC_BLDC_Saliency_Point(const FOC_t *foc, float *L_axis, float *cross_re, float *cross_im)
+{
+    float mv = 0.0f, mi = 0.0f, mx = 0.0f;
+    for (int i = 0; i < INJECTION_ROUNDS; i++)
+    {
+        mv += foc->vd_inj_buff[i];
+        mi += foc->id_inj_buff[i];
+        mx += foc->iq_inj_buff[i];
+    }
+    mv /= INJECTION_ROUNDS;
+    mi /= INJECTION_ROUNDS;
+    mx /= INJECTION_ROUNDS;
+
+    // Single-frequency DFT (as in FOC_BLDC_Parameter_Calculation_Inductance)
+    float Vc = 0.0f, Vs = 0.0f, Ic = 0.0f, Is = 0.0f, Xc = 0.0f, Xs = 0.0f;
+    for (int i = 0; i < INJECTION_ROUNDS; i++)
+    {
+        float angle = INJECTION_OMEGA * i * foc->sampling_time;
+        float c = Fast_Cos(angle), s = Fast_Sin(angle);
+        Vc += (foc->vd_inj_buff[i] - mv) * c;
+        Vs += (foc->vd_inj_buff[i] - mv) * s;
+        Ic += (foc->id_inj_buff[i] - mi) * c;
+        Is += (foc->id_inj_buff[i] - mi) * s;
+        Xc += (foc->iq_inj_buff[i] - mx) * c;
+        Xs += (foc->iq_inj_buff[i] - mx) * s;
+    }
+
+    float i2 = Ic * Ic + Is * Is;
+    if (i2 < 1e-12f)
+    {
+        return false;
+    }
+
+    // Z = V / I_axis = |V|/|I| at phase phi; L = |Z| sin(phi) / w (sign as in the Ld/Lq fit)
+    float phi = Fast_Atan2(Vs, Vc) - Fast_Atan2(Is, Ic);
+    float z = Fast_Sqrt((Vc * Vc + Vs * Vs) / i2);
+    *L_axis = fabsf(z * sinf(phi)) / INJECTION_OMEGA;
+
+    // I_perp / I_axis with phasors (c, s) treated as c + j*s
+    *cross_re = (Xc * Ic + Xs * Is) / i2;
+    *cross_im = (Xs * Ic - Xc * Is) / i2;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // Measurement of BLDC parameters using pre-defined signal injection
 FOC_FAST_CODE void FOC_BLDC_Parameter_Measurement_Update(FOC_t *foc)
 {
@@ -1872,11 +2075,11 @@ FOC_FAST_CODE void FOC_BLDC_Parameter_Measurement_Update(FOC_t *foc)
             }
         }
 
-        // Inject voltages in open-loop with zero angle
+        // Inject voltages in open-loop in the inj_angle frame
         foc->smo.theta_est = 0.0f;
 
         // Measure the resulting voltages and currents  (from the previous PWM cycle)
-        Clarke_Park_Transform(foc->i_a, foc->i_b, 0.0f, &(foc->i_d), &(foc->i_q));
+        Clarke_Park_Transform(foc->i_a, foc->i_b, foc->inj_angle, &(foc->i_d), &(foc->i_q));
 
         // Accumulate injected voltages and measured currents after certain rounds
         if (rs_run && foc->inj_n >= RS_ALIGN_ROUNDS && foc->inj_n < rs_low_end)
@@ -1905,6 +2108,7 @@ FOC_FAST_CODE void FOC_BLDC_Parameter_Measurement_Update(FOC_t *foc)
             {
                 foc->vd_inj_buff[index] = foc->v_d;
                 foc->id_inj_buff[index] = foc->i_d;
+                foc->iq_inj_buff[index] = foc->i_q; // Cross-axis response (saliency sweep); the Lq run overwrites it
             }
         }
 

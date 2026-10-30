@@ -5,6 +5,110 @@ Git history starts on 2026-10-26; this file holds the record before that and the
 status of each change (compile / sim / hardware). Newest first below; older sections are
 history (marked superseded where they no longer apply).
 
+## 2026-10-27: passive HFI estimator alongside the eSMO (step 1 of the HFI low-speed plan)
+
+- Goal: check that HF-injection position estimation works on this motor under load current,
+  using the eSMO angle (mid speed) as reference, before letting HFI steer anything.
+- `FOC_HFI_Update()` (FOC_FAST_CODE, called after `Current_Loop_Core` in MOTOR_RUNNING when
+  `foc->hfi_enable`): adds a +-`HFI_VOLTAGE` (0.075 V) square wave at PWM_FREQ/4 (5 kHz, sign held
+  2 periods: + + - -) along the control d-axis + delta, delta sweeping 0..pi per `HFI_WINDOW`
+  (2000 periods = 0.1 s). Demodulation: per-period step of the UNFILTERED alpha-beta currents
+  (the measurement LPF attenuates 5 kHz), projected on the applied axis, correlated with the
+  5 kHz reference (1, -j, -1, j); the perpendicular phasors are projected on the parallel
+  phasor's phase, so the PWM latch timing drops out. Lock-in on 2*delta gives `hfi_k` (saliency
+  signal), `hfi_err` (rotor d-axis minus control angle, mod pi), `hfi_apar` (HF step per
+  period) and `hfi_phase` (timing diagnostic). Never writes `foc->theta`; resets on coast/idle.
+  Control path otherwise unchanged.
+- First version (+-0.15 V at PWM_FREQ/2, sign flipped every period, second-difference demod)
+  FAILED on the bench: HF step 0.13 A instead of ~1.2 A, k 0.5-1.4, err ~35 deg. Cause: TIM1
+  latches a new duty mid-period (cf. the "~1.5 periods" note at the inverse Park), so each
+  sampling interval held half +V and half -V. Reproduced in sim with `speed_sim` env `HALF=0.5`.
+- `Src/freertos.c`: `RUN_HFI_PASSIVE 1` enables it at `HFI_ON_MS` (1.5 s) in the speed test;
+  5 extra log columns (hfi_k x1e4, hfi_err 0.1 deg, hfi_apar mA, hfi_ph deg, windows), printed by
+  a second printf to keep varargs stack use low.
+- Verification: compile (RAM 84.7 %, Flash 10.0 %, `FOC_HFI_Update` in .ccmram); sim
+  (`speed_sim` env `HFI`, `HALF` 0 / 0.3 / 0.5, constant-saliency plant Ld 7 / Lq 9.3 uH):
+  k 0.136-0.153 (theory 0.142), err within 0.3-2.5 deg of the true angle up to iq 11.7 A and with
+  dead time; eSMO error and speed holds unchanged. The sim plant has no cross-saturation.
+- **Bench 2026-10-27 (Claude-run, unloaded, 0.075 V = +-0.6 A ripple at 5 kHz, 1.5-6.1 s of the
+  speed test):**
+  - HFI d-axis agrees with the eSMO control angle: err +0.0..+0.6 deg at 1500 rad/s el,
+    -1.2..+0.0 deg at 2500 (window-to-window spread ~0.3 deg), +1 deg while accelerating.
+    iq only 0.2-1.6 A (unloaded): load dependence NOT tested yet.
+  - k 0.29 at 1500, 0.30-0.31 at 2500: about 2x the 1 kHz stationary sweep's ratio (~0.14).
+    apar 0.81 A (HF step), i.e. effective L ~4.6 uH at 5 kHz vs 6.4 uH at 1 kHz. Both point to
+    frequency-dependent (eddy-current) anisotropy; not yet explained. hfi_ph stable at 176 deg.
+  - ISR: ~1590 cycles typical with HFI vs ~1220 without (+~370), max 2008 of 3600.
+  - Speed holds, calibration and the saliency sweep (A2 0.92 uH, axis 6 deg) unchanged.
+- **Bench 2026-10-30, 10x4.7 propeller load** (`LOAD_STAIRS` 1500/2000/2500/3000 rad/s el,
+  `TEST_I_MAX` 10 A, HFI 0.075 V from 1.5 s; Claude-run after user OK):
+  - Start-up with the prop: handover at ~600 rad/s el, fine.
+  - HFI under load (k unloaded 0.29-0.31, err ~0..+0.6 deg): iq ~2 A (1500 hold) k 0.285-0.295,
+    err +1.4..+2.2 deg; iq 3-4 A (2000 hold) k 0.282-0.297, err +1.9..+3.5 deg; speed ramps with
+    iq 4-8 A k 0.279-0.293, err +4.5..+5.8 deg. Saliency signal drops only ~3 % up to 8 A; the HFI
+    axis moves ~+0.6 deg/A relative to the eSMO angle (cross-saturation or a load-dependent eSMO
+    error: not separable without an encoder). Smooth, so compensable.
+  - **Run ended by a fault at 4.2 s** (2000 -> 2500 ramp, iq ~8 A): Vbus fell 11.39 -> 10.47 ->
+    7.53 V within ~50 ms, then the IHM08M1 over-current comparator latched (brk = 1, MOE = 0; last
+    sample iq 30 A, i_a -29 A). The control ISR stopped (MOE gates the ADC trigger), the prop
+    coasted. Likely the bench supply reached its current limit (input power ~22 W, ~2 A at 11.3 V,
+    at that moment) and the falling bus took the gate driver / control out of range. The firmware
+    has no run-time bus under-voltage check: `V_BUS_MIN` is only checked before calibration/start.
+    2500 and 3000 rad/s el not reached.
+- **Run-time bus under-voltage trip (added after that run):** in `FOC_Update`, next to the
+  over-voltage trip: with the outputs on, `V_BUS_UV_PERIODS` (10 = 0.5 ms) consecutive samples
+  below `V_BUS_MIN` (8 V) -> `FOC_Coast`, `vbus_uv_fault` latched, calibration ended. Compile
+  (RAM 84.8 %, Flash 10.0 %) and sim (`speed_sim` env `VSAG`: 12 -> 6 V in 50 ms at iq ~6 A
+  trips at ~7.96 V and coasts with no current spike; regression unchanged).
+- **Bench re-run 2026-10-30 (supply limit set to 4 A by the user):** same staircase.
+  - The sag repeated at the same point: 2000 -> 2500 ramp, ~2300-2350 rad/s el, iq 8.1-8.4 A:
+    Vbus 11.41 -> 11.33 -> 10.45 V, then the new trip coasted (`vbus_uv_fault = 1`, no hardware
+    break, MOE stayed 1, phase currents ~0 while coasting, Vbus back to 11.3-11.6 V at once).
+    **UV trip hardware-verified.** Input power at the sag ~1.5*vq*iq = 23 W, ~2 A at 11.4 V: half the
+    stated 4 A limit, so the cause is not settled (supply limiting/protection behaviour, wiring,
+    or a measurement effect at high current). 2500/3000 again not reached.
+  - HFI: 1500 hold (iq 1.6-2.4 A) k 0.287-0.292, err +0.7..+1.4 deg; 2000 hold (iq 3.1-4.4 A)
+    k 0.285-0.299, err +0.8..+1.9 deg; ramps (iq 6-8 A, accelerating) k 0.300-0.305,
+    err +3.5..+4.6 deg. With run 1: k does not fall with load up to 8 A; the axis shift is
+    ~0.3 deg/A in steady holds, more during ramps (acceleration may add eSMO lag there).
+- The bench motor supply is a fixed 12 V 5 A unit (the only one available); its protection
+  apparently trips on the inverter's pulsed bus current at ~20-23 W.
+- **Bench gentle staircase 2026-10-30** (`LOAD_STAIRS` now: 1500, 500 rad/s^2 to 2000, hold,
+  250 rad/s^2 to 2500, hold; `TEST_I_MAX` 8 A): **completed, no faults**, Vbus 11.33-11.47 V.
+  - 1500 hold (iq 1.4-2.7 A): k 0.277-0.291, err -0.2..-0.4 deg.
+  - 2000 hold (iq 2.9-4.3 A): k 0.289-0.298, err -0.5..-0.6 deg.
+  - 2500 hold (iq 4.4-6.4 A, ~16 W): k 0.293-0.314, err -0.8..-1.0 deg.
+  - So steady-state HFI stays within ~1 deg of the eSMO up to ~6 A and k does not fall (rises
+    ~7 %). Run-to-run offset of err ~1 deg (this run negative, the previous one positive). With a
+    prop, speed and load rise together, so their effects on err cannot be separated here.
+  - ISR max 2031 cycles of 3600.
+
+## 2026-10-27: saliency sweep (feasibility check for HF-injection start / low speed)
+
+- Why: HF pulsating injection (e.g. Jiang & Cheng, Defence Technology 33, 2024) needs Ld != Lq;
+  the SK3 is a surface-PM outrunner and the Ld/Lq split from calibration was within its bias.
+- `FOC_t.inj_angle`: calibration injects and measures in this frame (`foc->theta = inj_angle`
+  in `FOC_CALIBRATION`); 0 for Rs/Ld/Lq, so those runs are unchanged (calib_sim identical).
+  The Ld-mode run now also records `i_q` (cross axis) into `iq_inj_buff` (the Lq run overwrites it).
+- `FOC_BLDC_Saliency_Point()`: per angle, apparent L along the injection axis and the complex
+  cross/axis current ratio (the signal an HFI observer tracks).
+- `Src/freertos.c` `RUN_SALIENCY_SWEEP 1`: after calibration, the Ld injection (1 kHz,
+  `INJECTION_VOLTAGE` 0.14 V, ~2.8 A peak, no DC) at 24 angles over 0..2pi (~0.7 s), then a
+  harmonic fit L(phi) = A0 + A1 cos(phi) + A2 cos(2 phi) and the residual. Set 0 to skip.
+- Verification: compile (`pio run`: RAM 84.6 %, Flash 10.0 %); sim (`tools/sim/saliency_sim`:
+  axis recovered to 0.3 deg, A2 ~5 nH on a non-salient rotor); **hardware: bench run 2026-10-27**
+  (Claude-run, rotor free, left aligned near 0 by the Rs run):
+  - L0 6.38 uH, **A2 0.92 uH (min-L axis 6 deg el)**, A1 4 nH, residual rms 72 nH.
+    Ld ~5.5 / Lq ~7.3 uH; phi and phi+pi agree within ~20 nH (rotor did not move).
+  - Cross/axis current ratio: 2nd-harmonic amplitude 0.099 (~0.28 A at 2.8 A axis current,
+    ~18 ADC LSB), with an imaginary part of similar size (Rs/eddy phase, not 90 deg): an HFI
+    demodulator must use the measured phase, not the paper's ideal 0/pi assumption.
+  - Calibration (Rs 0.02270, Ld 5.6 / Lq 7.2 uH) and the 5 s speed test (holds 1500 / 2500
+    rad/s el) unchanged.
+- Conclusion so far: zero-current (saturation) saliency is real, ~14 % of L0, clearly measurable at
+  standstill. Not yet known: how it changes with iq load (cross-saturation), and N/S polarity
+  (symmetric injection cannot see it). Nothing HFI-based is implemented.
+
 ## 2026-10-27: rotation direction API, direction-relative references
 
 - `bool FOC_Set_Direction(FOC_t *, BLDC_Direction_t)`: sets `rotor_dir` only while the bridge is
