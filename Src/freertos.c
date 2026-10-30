@@ -47,11 +47,11 @@
 #define RUN_DIRECTION NORMAL_DIRECTION // Speed test direction: NORMAL_DIRECTION or REVERSE_DIRECTION
 #define RUN_SALIENCY_SWEEP 1 // 1: after calibration, Ld-type HF injection at SWEEP_POINTS angles over 0..2pi
 #define SWEEP_POINTS 24
-#define RUN_HFI 3 // Speed test: 0 eSMO only; 1 HFI shadow (tracker runs below HFI_OMEGA_ON, logs eSMO
-                  // minus HFI, never takes control: the eSMO coasts the drive when it loses lock);
-                  // 2 HFI takes control below HFI_OMEGA_LOW;
-                  // 3 as 2, and the start from standstill is on HFI (N/S polarity pulses) instead of
-                  //   Align -> I-f (falls back to Align -> I-f when the polarity is not clear)
+// HFI (standstill start, low speed) is always on (foc-lib FOC_HFI). Test only:
+#define HFI_SHADOW_TEST 0 // 1: shadow run for measuring HFI_OMEGA_LOW (with TEST_PROFILE 3, then
+                          // tools/hfi_threshold.py): Align -> I-f start, the tracker runs below
+                          // HFI_OMEGA_ON and is logged beside the eSMO but never takes control (the
+                          // eSMO coasts the drive when it loses lock)
 #define TEST_PROFILE 4 // Speed test profile (rad/s el):
                        // 0: 1500, 2500 from 3 s (5 s)
                        // 1: gentle staircase for a propeller load (8 s): 1500, ramp 500 rad/s^2 to 2000,
@@ -59,9 +59,9 @@
                        //    ~20 W (2026-10-30), so no 3000 step and slow ramps (less inertia current).
                        // 2: low speed (12 s): 1500, 150 from 2.5 s (the drive cannot brake: it coasts
                        //    down through the eSMO -> HFI switch), 0 from 8.5 s, 1500 from 10 s
-                       // 3: slow sweep down (11 s), for RUN_HFI 1: 1500 to 2.5 s, then 800 falling at
+                       // 3: slow sweep down (11 s), for HFI_SHADOW_TEST 1: 1500 to 2.5 s, then 800 falling at
                        //    100 rad/s^2 to 100 at 9.5 s, hold. smo_hfi vs speed shows the eSMO's limit
-                       // 4: HFI from standstill (11 s), for RUN_HFI 3: 150 to 5 s (with a prop, the start
+                       // 4: HFI from standstill (11 s): 150 to 5 s (with a prop, the start
                        //    accelerates its inertia at the current cap; the hold may be braked by hand),
                        //    0 from 5 s, 150 from 6.5 s, 1500 from 8 s (HFI -> eSMO)
 #define TEST_I_MAX 5.0f // Speed-test current cap (A): iq_ref and the speed PI output (default I_RATED)
@@ -494,9 +494,7 @@ void StartDefaultTask(void *argument)
     foc.speed_ref = 1500.0f;
     foc.bldc.max_current = TEST_I_MAX;
     PI_Set_Output_Limit(&foc.speed_ctrl, TEST_I_MAX);
-    foc.hfi_enable = (RUN_HFI != 0); // Only acts in MOTOR_RUNNING
-    foc.hfi_takeover = (RUN_HFI >= 2);
-    foc.hfi_start = (RUN_HFI == 3);
+    foc.hfi_takeover = !HFI_SHADOW_TEST; // Test only (see HFI_SHADOW_TEST)
     foc.motor_mode = MOTOR_IDLE;
     foc.foc_mode = FOC_SPEED_CONTROL;
 
@@ -563,9 +561,11 @@ void StartDefaultTask(void *argument)
         if (foc.motor_mode == MOTOR_RUNNING && last_mode != MOTOR_RUNNING)
             printf("*** Startup complete: handover to closed loop at speed %f rad/s, id = %f A, iq = %f A\r\n",
                    foc.omega, foc.id_ref, foc.iq_ref);
-        if (foc.hfi_start && foc.motor_mode != MOTOR_STARTUP_HFI && last_mode == MOTOR_STARTUP_HFI)
-            printf("*** HFI start: |Zp| +pulse %d mA, -pulse %d mA -> polarity %d (1 kept, -1 flipped, 0 -> Align/I-f)\r\n",
-                   (int)(foc.hfi_zp_pos * 1000.0f), (int)(foc.hfi_zp_neg * 1000.0f), (int)foc.hfi_pol);
+        if (foc.motor_mode != MOTOR_STARTUP_HFI && last_mode == MOTOR_STARTUP_HFI)
+            printf("*** HFI start: probe %d mrad (expect ~-500), |Zp| +pulse %d mA, -pulse %d mA -> polarity %d "
+                   "(1 kept, -1 flipped, 0 -> Align/I-f)\r\n",
+                   (int)(foc.hfi_probe_e * 1000.0f), (int)(foc.hfi_zp_pos * 1000.0f),
+                   (int)(foc.hfi_zp_neg * 1000.0f), (int)foc.hfi_pol);
         last_mode = foc.motor_mode;
         printf("%d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d",
                (int)t_ms, (int)foc.motor_mode, (int)foc.startup_omega,
@@ -592,7 +592,6 @@ void StartDefaultTask(void *argument)
     printf("Stopping FOC control... (vbus_fault = %d, vbus_uv_fault = %d)\r\n", (int)foc.vbus_fault,
            (int)foc.vbus_uv_fault);
     foc.foc_mode = FOC_IDLE;
-    foc.hfi_enable = false;
     foc.bldc.max_current = I_RATED;
     PI_Set_Output_Limit(&foc.speed_ctrl, I_RATED);
     // Coast check: the rotor is still spinning down here; ia/ib must stay ~0 with moe = 0

@@ -993,9 +993,7 @@ void FOC_Init(FOC_t *foc, uint32_t pwm_res, uint32_t adc_offset)
     foc->inj_start_flag = false;
     foc->inj_fault = false;
     foc->inj_angle = 0.0f;
-    foc->hfi_enable = false;
     foc->hfi_takeover = true;
-    foc->hfi_start = false;
     foc->hfi_pol = 0;
     foc->hfi_on = false;
     foc->hfi_control = false;
@@ -1078,7 +1076,9 @@ FOC_FAST_CODE void FOC_Coast(FOC_t *foc)
 }
 
 static void FOC_Speed_Control(FOC_t *foc);
+#if FOC_HFI
 static void FOC_Current_Loop_HFI(FOC_t *foc);
+#endif
 FOC_INLINE void Current_Loop_Core(FOC_t *foc);
 
 // ---------------------------------------------------------------------------
@@ -1161,14 +1161,11 @@ FOC_FAST_CODE void FOC_Update(FOC_t *foc)
             {
                 FOC_Speed_Control(foc);
             }
-            if (foc->hfi_enable)
-            {
-                FOC_Current_Loop_HFI(foc); // eSMO, or HFI at low speed
-            }
-            else
-            {
-                Current_Loop_Core(foc); // eSMO only
-            }
+#if FOC_HFI
+            FOC_Current_Loop_HFI(foc); // eSMO, or HFI at low speed
+#else
+            Current_Loop_Core(foc); // eSMO only
+#endif
             break;
 
         default:
@@ -1449,7 +1446,11 @@ void FOC_Current_Loop_Update(FOC_t *foc)
         return;
     }
 
+#if FOC_HFI
+    FOC_Current_Loop_HFI(foc);
+#else
     Current_Loop_Core(foc);
+#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -1482,6 +1483,7 @@ static inline float Wrap_Pm_Pi(float a)
     return a;
 }
 
+#if FOC_HFI
 // ---------------------------------------------------------------------------
 // HFI tracker (see HFI_VOLTAGE in foc_lib.h). Started at the eSMO's angle and speed while running,
 // at 0 from standstill (MOTOR_STARTUP_HFI).
@@ -1493,6 +1495,7 @@ FOC_FAST_CODE static void HFI_Start(FOC_t *foc, float theta, float omega)
     foc->hfi_fault_cnt = 0;
     foc->hfi_theta = theta;
     foc->hfi_omega = omega;
+    foc->hfi_probe = 0.0f;
     for (int j = 0; j < 4; j++)
     {
         foc->hfi_par[j] = 0.0f;
@@ -1548,11 +1551,18 @@ FOC_FAST_CODE static bool HFI_Track(FOC_t *foc)
             foc->hfi_fault_cnt = 0;
         }
 
-        // PLL (forward Euler, integrator = speed estimate)
-        e = CONSTRAIN(e, -HFI_ERR_MAX, HFI_ERR_MAX);
-        foc->hfi_omega = CONSTRAIN(foc->hfi_omega + HFI_PLL_KI * foc->sampling_time * e,
-                                   -ESMO_OMEGA_MAX, ESMO_OMEGA_MAX);
-        w = foc->hfi_omega + HFI_PLL_KP * e;
+        // PLL (forward Euler, integrator = speed estimate); frozen during the saliency probe
+        if (foc->hfi_probe == 0.0f)
+        {
+            e = CONSTRAIN(e, -HFI_ERR_MAX, HFI_ERR_MAX);
+            foc->hfi_omega = CONSTRAIN(foc->hfi_omega + HFI_PLL_KI * foc->sampling_time * e,
+                                       -ESMO_OMEGA_MAX, ESMO_OMEGA_MAX);
+            w = foc->hfi_omega + HFI_PLL_KP * e;
+        }
+        else
+        {
+            w = 0.0f;
+        }
     }
     foc->hfi_theta = Wrap_Once(foc->hfi_theta + w * foc->sampling_time);
 
@@ -1565,11 +1575,12 @@ FOC_FAST_CODE static bool HFI_Track(FOC_t *foc)
     return true;
 }
 
-// Add the square wave along hfi_theta (after the current controller) and remember the
-// alpha-beta axis it is applied on (the inverse Park adds ipark_adv * omega to every voltage)
+// Add the square wave along hfi_theta + hfi_probe (after the current controller) and remember
+// the alpha-beta axis it is applied on (the inverse Park adds ipark_adv * omega to every voltage)
 FOC_FAST_CODE static void HFI_Inject(FOC_t *foc)
 {
-    float delta = foc->hfi_theta - foc->theta; // Both in [0, 2pi)
+    const float axis = Wrap_Once(foc->hfi_theta + foc->hfi_probe); // hfi_probe: 0 or HFI_PROBE_ANGLE
+    float delta = axis - foc->theta; // Both in [0, 2pi)
     if (delta < 0.0f)
     {
         delta += TWO_PI;
@@ -1584,11 +1595,11 @@ FOC_FAST_CODE static void HFI_Inject(FOC_t *foc)
     {
         foc->hfi_phi_h[j] = foc->hfi_phi_h[j - 1];
     }
-    foc->hfi_phi_h[0] = Wrap_Once(foc->hfi_theta + foc->ipark_adv * foc->omega);
+    foc->hfi_phi_h[0] = Wrap_Once(axis + foc->ipark_adv * foc->omega);
     foc->hfi_idx = (foc->hfi_idx + 1u) & 3u;
 }
 
-// Closed-loop step with the eSMO <-> HFI switch (MOTOR_RUNNING, foc->hfi_enable).
+// Closed-loop step with the eSMO <-> HFI switch (MOTOR_RUNNING).
 // The eSMO runs every period; its lock flag only matters while it is in control.
 FOC_FAST_CODE static void FOC_Current_Loop_HFI(FOC_t *foc)
 {
@@ -1686,6 +1697,7 @@ FOC_FAST_CODE static void FOC_Current_Loop_HFI(FOC_t *foc)
         HFI_Inject(foc);
     }
 }
+#endif // FOC_HFI
 
 // Speed loop (FOC_SPEED_CONTROL, MOTOR_RUNNING), every SPEED_CTRL_DIVIDER periods.
 // Works in the rotation-direction frame (speed_ref, speed_ref_ramp, error and torque all
@@ -1771,7 +1783,9 @@ FOC_FAST_CODE void FOC_BLDC_Startup_Update(FOC_t *foc)
         SMO_Reset(&(foc->smo));
         Harm_Reset(foc);
         foc->outputs_enabled = true;
-        if (foc->hfi_enable && foc->hfi_takeover && foc->hfi_start)
+        foc->motor_mode = MOTOR_STARTUP_ALIGN;
+#if FOC_HFI
+        if (foc->hfi_takeover) // The shadow test starts with Align -> I-f
         {
             HFI_Start(foc, 0.0f, 0.0f);
             foc->hfi_stage = 0;
@@ -1779,17 +1793,16 @@ FOC_FAST_CODE void FOC_BLDC_Startup_Update(FOC_t *foc)
             foc->hfi_pol_n = 0;
             foc->hfi_zp_pos = 0.0f;
             foc->hfi_zp_neg = 0.0f;
+            foc->hfi_probe_e = 0.0f;
             foc->motor_mode = MOTOR_STARTUP_HFI;
         }
-        else
-        {
-            foc->motor_mode = MOTOR_STARTUP_ALIGN;
-        }
+#endif
         break;
 
+#if FOC_HFI
     case MOTOR_STARTUP_HFI:
     {
-        // See HFI_LOCK_TIME in foc_lib.h: lock, +pulse, zero, -pulse, zero, then decide
+        // See HFI_LOCK_TIME in foc_lib.h: lock, saliency probe, +pulse, zero, -pulse, zero, decide
         if (!HFI_Track(foc))
         {
             foc->hfi_fault = true;
@@ -1799,14 +1812,18 @@ FOC_FAST_CODE void FOC_BLDC_Startup_Update(FOC_t *foc)
         foc->startup_timer += ts;
 
         const uint8_t stage = foc->hfi_stage;
-        const bool pulse = (stage == 1u || stage == 3u);
-        const float id_target = (stage == 1u) ? HFI_POL_CURRENT : (stage == 3u) ? -HFI_POL_CURRENT : 0.0f;
-        const float t_end = (stage == 0u) ? HFI_LOCK_TIME : pulse ? HFI_POL_TIME : HFI_POL_ZERO;
+        const bool pulse = (stage == 2u || stage == 4u);
+        const float id_target = (stage == 2u) ? HFI_POL_CURRENT : (stage == 4u) ? -HFI_POL_CURRENT : 0.0f;
+        const float t_end = (stage == 0u) ? HFI_LOCK_TIME : (stage == 1u) ? HFI_PROBE_TIME : pulse ? HFI_POL_TIME : HFI_POL_ZERO;
 
-        // |Zp| sums over the second half of each pulse (averaged at the end of the pulse)
-        if (pulse && foc->startup_timer >= 0.5f * HFI_POL_TIME)
+        // Second half of the probe: tracker error; of each pulse: |Zp| (averaged at the end)
+        if ((stage == 1u || pulse) && foc->startup_timer >= 0.5f * t_end)
         {
             if (stage == 1u)
+            {
+                foc->hfi_probe_e += foc->hfi_err;
+            }
+            else if (stage == 2u)
             {
                 foc->hfi_zp_pos += foc->hfi_zp;
             }
@@ -1817,8 +1834,8 @@ FOC_FAST_CODE void FOC_BLDC_Startup_Update(FOC_t *foc)
             foc->hfi_pol_n++;
         }
 
-        // Lock: follow the tracker (no current). Pulses: the angle locked at the end of stage 0.
-        foc->theta = (stage == 0u) ? foc->hfi_theta : foc->startup_theta;
+        // Lock and probe: follow the tracker (no current). Pulses: the angle locked before them.
+        foc->theta = (stage <= 1u) ? foc->hfi_theta : foc->startup_theta;
         foc->omega = 0.0f;
         foc->id_ref = Slew_To(foc->id_ref, id_target, HFI_POL_SLEW * ts);
         foc->iq_ref = 0.0f;
@@ -1831,24 +1848,36 @@ FOC_FAST_CODE void FOC_BLDC_Startup_Update(FOC_t *foc)
             break;
         }
         foc->startup_timer = 0.0f;
+        const float n = (foc->hfi_pol_n > 0u) ? (float)foc->hfi_pol_n : 1.0f;
+        foc->hfi_pol_n = 0;
         if (stage == 0u)
         {
-            foc->startup_theta = foc->hfi_theta;
+            foc->hfi_probe = HFI_PROBE_ANGLE; // Freezes the PLL and offsets the injection axis
         }
-        if (pulse)
+        else if (stage == 1u)
         {
-            const float n = (foc->hfi_pol_n > 0u) ? (float)foc->hfi_pol_n : 1.0f;
-            if (stage == 1u)
+            foc->hfi_probe = 0.0f;
+            foc->hfi_fault_cnt = 0; // The deliberate probe error is not a fault
+            foc->hfi_probe_e /= n;
+            foc->startup_theta = foc->hfi_theta;
+            // No saliency: the tracker reads ~0 at any angle. Do not pulse at an unknown angle.
+            if (foc->hfi_probe_e > -HFI_PROBE_MIN)
             {
-                foc->hfi_zp_pos /= n;
+                foc->hfi_pol = 0;
+                foc->hfi_on = false;
+                foc->motor_mode = MOTOR_STARTUP_ALIGN;
+                break;
             }
-            else
-            {
-                foc->hfi_zp_neg /= n;
-            }
-            foc->hfi_pol_n = 0;
         }
-        if (stage < 4u)
+        else if (stage == 2u)
+        {
+            foc->hfi_zp_pos /= n;
+        }
+        else if (stage == 4u)
+        {
+            foc->hfi_zp_neg /= n;
+        }
+        if (stage < 5u)
         {
             foc->hfi_stage = stage + 1u;
             break;
@@ -1898,6 +1927,7 @@ FOC_FAST_CODE void FOC_BLDC_Startup_Update(FOC_t *foc)
         foc->motor_mode = MOTOR_RUNNING;
         break;
     }
+#endif // FOC_HFI
 
     case MOTOR_STARTUP_ALIGN:
         foc->startup_timer += ts;

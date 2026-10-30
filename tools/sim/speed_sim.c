@@ -12,15 +12,14 @@
  *   LD_EST, RS_EST   controller's (calibrated) Ld / Rs differing from the plant
  *   XD       extra PWM periods of delay in the plant (unmodelled latency)
  *   J        rotor inertia (default 1.4e-5 kg m^2, from the bench acceleration)
- *   HFI      time (s) to set foc.hfi_enable (eSMO <-> HFI switching); prints each switch and,
- *            every 0.1 s while enabled, the TRUE rotor-minus-control angle (mean, max |.|)
+ *   (HFI is always on unless built with -DFOC_HFI=0.) Prints each tracker / control switch and,
+ *            every 0.1 s while running, the TRUE rotor-minus-control angle (mean, max |.|)
  *   PROF     "low": speed_ref 1500, 150 from 2 s, 0 from 5 s, 1500 from 7 s (instead of 1500/2500);
- *            "start": 150 from standstill, 1500 from 3 s (with HSTART=1: HFI start)
- *   HSTART   1: foc.hfi_enable and foc.hfi_start (standstill start on HFI, N/S polarity pulses)
+ *            "start": 150 from standstill, 1500 from 3 s (the HFI start);
+ *            "bench": the freertos.c TEST_PROFILE 2 schedule (150 from 2.5 s, 0 from 8.5 s, 1500 from 10 s)
+ *   SHADOW   1: foc.hfi_takeover = false (Align -> I-f start; tracker beside the eSMO, never in control)
  *   IMAX     current cap (A) as TEST_I_MAX in freertos.c
  *   SAT      d-axis saturation: incremental Ld = Ld * (1 - SAT * id), clamped 0.5..1.5 (per A)
- *            "bench": the freertos.c TEST_PROFILE 2 schedule (150 from 2.5 s, 0 from 8.5 s, 1500 from 10 s)
- *   SHADOW   1: foc.hfi_takeover = false (tracker runs alongside the eSMO, never in control)
  *   SEED     offset (deg) added to the HFI tracker's start angle (sign / pull-in test)
  *   VDT, I0  inverter dead-time error per phase (V) with a soft knee (A), as in calib_sim
  *   VSAG     time (s) at which the bus falls from 12 V to 6 V over 50 ms (supply current limit)
@@ -88,7 +87,6 @@ int main(int argc, char **argv)
     double te_before = 0, wm_at_handover = 0, te_min_after = 1e9, te_max_after = -1e9, wm_min_after = 1e9;
     double cur_ang_prev = 0, max_cur_ang_jump = 0, err_sum = 0, id_sum = 0; int n_err = 0;
     double brake_peak = 0;
-    const double t_hfi = getenv("HFI") ? atof(getenv("HFI")) : -1;
     const double t_sag = getenv("VSAG") ? atof(getenv("VSAG")) : -1;
     const double vdt = getenv("VDT") ? atof(getenv("VDT")) : 0, i0 = getenv("I0") ? atof(getenv("I0")) : 0.05;
     const double half = getenv("HALF") ? atof(getenv("HALF")) : 0; /* fraction of the period still on the old command */ uint32_t ha = PWM_RES / 2, hb = PWM_RES / 2, hc = PWM_RES / 2;
@@ -96,7 +94,6 @@ int main(int argc, char **argv)
     const int prof_bench = getenv("PROF") && !strcmp(getenv("PROF"), "bench");
     if (getenv("SHADOW") && atoi(getenv("SHADOW"))) foc.hfi_takeover = false;
     const int prof_start = getenv("PROF") && !strcmp(getenv("PROF"), "start");
-    if (getenv("HSTART") && atoi(getenv("HSTART"))) { foc.hfi_enable = true; foc.hfi_start = true; }
     const double sat = getenv("SAT") ? atof(getenv("SAT")) : 0.0;
 if (getenv("IMAX")) { foc.bldc.max_current = (float)atof(getenv("IMAX")); PI_Set_Output_Limit(&foc.speed_ctrl, foc.bldc.max_current); } /* test current cap */
     const double seed = getenv("SEED") ? atof(getenv("SEED")) * M_PI / 180 : 0;
@@ -121,7 +118,6 @@ if (getenv("IMAX")) { foc.bldc.max_current = (float)atof(getenv("IMAX")); PI_Set
         else if (prof_bench) foc.speed_ref = (t >= 10.0) ? 1500.0f : (t >= 8.5) ? 0.0f : (t >= 2.5) ? 150.0f : 1500.0f;
         else if (prof_low) foc.speed_ref = (t >= 7.0) ? 1500.0f : (t >= 5.0) ? 0.0f : (t >= 2.0) ? 150.0f : 1500.0f;
         else if (t >= 3.0) foc.speed_ref = 2500.0f;
-        if (t_hfi >= 0 && t >= t_hfi) foc.hfi_enable = true;
         FOC_Update(&foc);
         if (foc.hfi_on && !last_on && seed != 0) foc.hfi_theta = (float)fmod(foc.hfi_theta + seed + 2 * M_PI, 2 * M_PI);
         if (foc.hfi_on != last_on || foc.hfi_control != last_ctrl)
@@ -129,7 +125,7 @@ if (getenv("IMAX")) { foc.bldc.max_current = (float)atof(getenv("IMAX")); PI_Set
                    t, foc.hfi_on ? "ON " : "off", foc.hfi_control ? "HFI " : "eSMO", wm * p, foc.omega, foc.smo.omega_est, foc.hfi_omega,
                    wrap(th - foc.theta) * 180 / M_PI, wrap(foc.hfi_theta - th) * 180 / M_PI, foc.hfi_fault ? " FAULT" : "");
         last_on = foc.hfi_on; last_ctrl = foc.hfi_control;
-        if (foc.hfi_enable && foc.motor_mode == MOTOR_RUNNING) {
+        if (FOC_HFI && foc.motor_mode == MOTOR_RUNNING) {
             double e = wrap(th - foc.theta);
             hfi_e_sum += e; hfi_q_sum += iq; hfi_e_n++; if (fabs(e) > hfi_e_max) hfi_e_max = fabs(e);
             if (k % 2000 == 0) {

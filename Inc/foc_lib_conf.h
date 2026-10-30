@@ -14,5 +14,8 @@
 //   #define R_SHUNT 0.005f
 //   #define CURRENT_SENSE_POLARITY (1.0f)
 //   #define POLE_PAIRS 4
+// HFI (standstill start, low speed) is always on. Only a motor with too little saliency for HFI
+// would turn it off: Align -> I-f start and the eSMO only.
+//   #define FOC_HFI 0
 
 #endif // FOC_LIB_CONF_H

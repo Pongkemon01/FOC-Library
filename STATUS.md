@@ -5,6 +5,36 @@ Git history starts on 2026-10-26; this file holds the record before that and the
 status of each change (compile / sim / hardware). Newest first below; older sections are
 history (marked superseded where they no longer apply).
 
+## 2026-10-30: HFI always on; saliency probe before the polarity pulses
+
+- User decision: HFI is no longer optional at run time. Removed `foc->hfi_enable` and
+  `foc->hfi_start`: every start from standstill is `MOTOR_STARTUP_HFI` and `MOTOR_RUNNING` always
+  runs the eSMO <-> HFI switch (`FOC_Current_Loop_HFI`; `FOC_Current_Loop_Update` too).
+  Port-level `FOC_HFI` (default 1, `#ifndef` in foc_lib.h, example in `Inc/foc_lib_conf.h`) = 0
+  compiles HFI out for a motor without enough saliency: Align -> I-f and the eSMO only.
+  `foc->hfi_takeover` stays as a test-only field (default true; the shadow run for measuring
+  HFI_OMEGA_LOW sets it false: Align -> I-f start, tracker logged, never in control).
+- New saliency probe (stage 1 of MOTOR_STARTUP_HFI, 10 ms, no current): PLL frozen, injection
+  45 deg off the tracker axis; with saliency the error reads ~-0.5 rad on either end. Above
+  -`HFI_PROBE_MIN` (0.2) no polarity pulses are applied and the start falls back to Align -> I-f.
+  Found in sim once HFI became the default: on a non-salient plant (Lq = Ld) the tracker angle is
+  meaningless but looks converged, and the 6 A pulses kicked the rotor to -319 rad/s el.
+- `Src/freertos.c`: `RUN_HFI` -> `HFI_SHADOW_TEST` (0 normal, 1 shadow); the HFI start line also
+  prints the probe value. speed_sim: options HFI / HSTART removed (always on), SHADOW kept.
+- Verification: compile (RAM 78.5 %, Flash 10.0 %; FOC_HFI 0 and 1 both compile without
+  warnings). Sims: built with -DFOC_HFI=0 all five standard sims are byte-identical to c4c36a9.
+  Default build (-DHFI_K=0.14f): Lq = Ld -> no pulses, Align -> I-f at 0.11 s, rotor unmoved;
+  salient without saturation -> pulses, below margin -> Align -> I-f; SAT 0.01 -> HFI start, flip,
+  bench schedule eSMO -> HFI -> eSMO; wrong-pole seed re-seeded; shadow; prop start at 5 A.
+  `startup_sim 0.03 1e-5 1 -1 2.5` (heavy load) coasts out with and without HFI: I-f at
+  I_STARTUP gives ~0.020 N m against 0.03 N m (the README's "heavy load succeeds" baseline was
+  stale since the motor constants changed).
+- **Bench 2026-10-30 (prop on, TEST_PROFILE 4, 5 A cap): hardware-verified, no fault.** Probe
+  -370 mrad (limit -200; -500 if HFI_K matched exactly: the standstill K is ~0.22 vs 0.30), then
+  |Zp| +pulse 2.754 A, -pulse 3.092 A: 12 % contrast, **flipped** (-1; the previous run kept +1,
+  so both branches are now seen on hardware). 150 hold on HFI 149.6 +- 6.3 rad/s el (eSMO - HFI
+  -5.5 +- 3.4 deg), 0 hold 0.1, HFI -> eSMO at ~452 rad/s el during the 1500 step. ISR max 2197.
+
 ## 2026-10-30: threshold from data; standstill start on HFI (N/S polarity)
 
 - `HFI_OMEGA_LOW` 293 -> **300 rad/s el** (409 rpm), derived from the stage-1 shadow log with the

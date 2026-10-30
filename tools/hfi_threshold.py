@@ -1,6 +1,6 @@
 """Recommend HFI_OMEGA_LOW from a shadow-sweep bench log.
 
-Run the bench test with RUN_HFI 1 (shadow) and TEST_PROFILE 3 (slow sweep down), save the
+Run the bench test with HFI_SHADOW_TEST 1 and TEST_PROFILE 3 (Src/freertos.c) (slow sweep down), save the
 serial output, then:
 
     python tools/hfi_threshold.py run.log [--pole-pairs 7] [--bin 25] [--factor 1.5]
@@ -49,7 +49,7 @@ def main():
         sd = math.sqrt(sum((x - m) ** 2 for x in d) / len(d))
         rows.append((b * a.bin, (b + 1) * a.bin, len(d), m, sd))
     if len(rows) < 3:
-        raise SystemExit("not enough shadow samples (need RUN_HFI 1 with TEST_PROFILE 3)")
+        raise SystemExit("not enough shadow samples (need HFI_SHADOW_TEST 1 with TEST_PROFILE 3)")
 
     ref_rows = rows[-2:]  # Fastest two bins
     ref = sum(r[4] for r in ref_rows) / len(ref_rows)
