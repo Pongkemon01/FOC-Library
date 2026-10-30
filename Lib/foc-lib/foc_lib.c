@@ -3,6 +3,165 @@
 #include "foc_lib.h"
 #include <string.h> // memcpy (bit test in Trig_In_Range)
 
+// ============================================================================
+// Internal constants (derived from foc_lib.h or fixed by the algorithms; not for the user)
+// ============================================================================
+#define ONE_OVER_SQRT3 0.57735026919f // 1 / sqrt(3)
+#define TWO_OVER_SQRT3 1.15470053838f // 2 / sqrt(3)
+#define TWO_PI 6.28318530718f         // 2 * pi
+#define PI 3.14159265359f             // pi
+#define HALF_PI 1.57079632679f        // pi / 2
+#define SQRT3_OVER_2 0.86602540378f   // sqrt(3) / 2
+
+#define CONSTRAIN(val, min, max) \
+    ((val) <= (min) ? (min) : ((val) >= (max) ? (max) : (val)))
+
+// Sampling and sensing
+#define TS (1.0f / PWM_FREQ)                                        // Sampling period (s)
+#ifndef PWM_RES
+#define PWM_RES 28799 // Reference PWM period count (TIM1 at 72 MHz, 20 kHz, centre-aligned): host sims
+#endif
+#define ADC_2_VOLT (ADC_V_REF / (float)ADC_RES)                     // ADC counts to volts
+#define ADC_OFFSET ((int)((V_OFFSET / (float)ADC_V_REF) * ADC_RES)) // ADC counts at zero current
+#define V_2_CURRENT (CURRENT_SENSE_POLARITY / (V_GAIN * R_SHUNT))   // Sense voltage to current (A/V)
+#define ADC_2_VBUS (ADC_2_VOLT / V_BUS_GAIN)                        // ADC counts to bus volts
+#define ADC_2_CURRENT (ADC_2_VOLT * V_2_CURRENT)                    // ADC counts to amps
+#define BETA_LPF_MEAS (1.0f - ALPHA_LPF_MEAS)                       // Current LPF: 1 - alpha
+
+// Enhanced sliding-mode observer (eSMO) -> see SMO_Update()
+#define KP_PLL 630.0f                 // PLL proportional gain
+#define KI_PLL 100000.0f              // PLL integral gain
+#define MIN_BEMF_AMPLITUDE 0.1f       // Minimum back-EMF amplitude for reliable estimation (V)
+#define ESMO_K_SLIDE_MIN 1.0f         // Minimum sliding gain (V)
+#define ESMO_K_SLIDE_MARGIN 1.5f      // Sliding gain = margin * |E_hat| (must be > 1)
+#define ESMO_BOUNDARY_GAIN 0.0f       // lambda in (0, 1+F). 0 = auto (lambda = F, deadbeat current error)
+#define ESMO_WC_MIN (TWO_PI * 30.0f)  // Minimum back-EMF LPF cutoff (rad/s)
+#define ESMO_WC_RATIO 2.0f            // LPF cutoff = ratio * |omega| -> constant atan(1/ratio) lag, compensated
+#define ESMO_WC_MAX_TS 0.7f           // Ceiling on wc*Ts: keeps the discrete back-EMF loop well damped
+#define ESMO_LOCK_ERR 0.10f           // |sin(angle error)| below which the PLL counts as locked (~6 deg)
+#define ESMO_UNLOCK_ERR 0.50f         // |sin(angle error)| above which lock is lost (~30 deg)
+#define ESMO_PLL_ERR_ALPHA (TS / 0.005f) // Smoothing of the PLL error used for the lock detector (5 ms time constant)
+#define ESMO_UNLOCK_COUNT ((uint16_t)(0.005f * PWM_FREQ)) // Consecutive bad samples before reporting loss of lock (5 ms)
+
+// 6x harmonic compensation in closed loop (FOC_Harmonic_Comp). The 5th/7th back-EMF harmonics of
+// the 12N14P outrunner appear in d/q as vectors rotating at -6 and +6 x omega (1.4-2.4 kHz at
+// 1500-2500 rad/s el), beyond the PI current loop. Each is integrated in its own rotating frame,
+// phase-compensated with the plant seen at that frequency (PWM delay, current LPF, RL, PI loop).
+#define HARM_V_MAX 0.5f           // Magnitude limit of each harmonic voltage vector (V)
+#define HARM_OMEGA_MIN 300.0f     // Active above this |omega| (electrical rad/s)
+#define HARM_DELAY_TS 1.5f        // PWM delay seen by the harmonic, in periods (as IPARK_DELAY_COMP)
+
+// Calibration. Rs is measured at two DC levels (INJECTION_VOLTAGE_RS_LOW, then INJECTION_VOLTAGE)
+// and taken from the difference, which cancels the inverter's voltage error only where that error
+// is constant. Before recording the low level, the DC field pulls the unloaded rotor into
+// alignment; its swing (back-EMF) biased Rs at 20 kHz when only INJECTION_ROUNDS were allowed.
+#define RS_ALIGN_ROUNDS ((uint32_t)(0.3f * PWM_FREQ))
+#define MIN_SALIENCY_H 1e-7f                      // Below this Lq-Ld the motor is treated as non-salient (H)
+#define INJECTION_FREQ 1000.0f                    // Injection frequency for parameter measurement (Hz)
+#define INJECTION_OMEGA (TWO_PI * INJECTION_FREQ) // Injection angular frequency (rad/s)
+#define CAL_PARAM_TOL 4.0f                        // Calibrated Rs/Ld/Lq accepted within RS,LS / tol .. * tol
+
+// Control loops
+#define VD_MAX (V_RATED * ONE_OVER_SQRT3)                                  // Maximum D-axis voltage (V)
+#define CURRENT_CONTROL_O_BANDWIDTH (TWO_PI * CURRENT_CONTROL_F_BANDWIDTH) // Current control bandwidth (rad/s)
+#define KP_I (LS * CURRENT_CONTROL_O_BANDWIDTH)                            // Current controller proportional gain
+#define KI_I (RS * CURRENT_CONTROL_O_BANDWIDTH)                            // Current controller integral gain
+// Speed loop: runs inside FOC_Update (MOTOR_RUNNING, FOC_SPEED_CONTROL) every SPEED_CTRL_DIVIDER
+// periods. Plant: d(omega_el)/dt = SPEED_PLANT_GAIN * iq. Motoring only (no regenerative braking):
+// a bench supply cannot absorb the returned energy.
+#define SPEED_CTRL_DIVIDER ((uint16_t)(PWM_FREQ / 1000.0f))  // Speed loop every N current-loop periods (1 kHz)
+#define TS_SPEED (SPEED_CTRL_DIVIDER * TS)                   // Speed loop sampling period (s)
+#define SPEED_CTRL_BANDWIDTH (TWO_PI * SPEED_CTRL_BW_HZ)     // Speed loop crossover (rad/s), well below the PLL
+#define KP_SPEED (SPEED_CTRL_BANDWIDTH / SPEED_PLANT_GAIN)   // Speed controller proportional gain (A per rad/s el)
+#define KI_SPEED (KP_SPEED * SPEED_CTRL_BANDWIDTH * 0.25f)   // Speed controller integral gain (PI zero at bandwidth/4)
+#define V_BUS_UV_PERIODS 10u                                 // Consecutive low samples before the under-voltage trip
+
+// Pass as output_limit to disable output clamping
+#define PI_NO_OUTPUT_LIMIT (-1.0f)
+
+// Internal functions (defined below)
+static void PI_Init(PI_Controller_t *controller, float Kp, float Ki, float sampling_time, float output_limit);
+static void PI_Reset(PI_Controller_t *controller);
+static void PI_Change_Params(PI_Controller_t *controller, float Kp, float Ki, float sampling_time);
+static void PI_Set_Output_Limit(PI_Controller_t *controller, float output_limit);
+static void FOC_BLDC_Parameter_Measurement_Update(FOC_t *foc);
+static void Init_Trigonometric_Tables(void);
+static void Normalize_Angle(float *angle);
+static float Fast_Sin(float angle);
+static float Fast_Cos(float angle);
+static void Fast_Sin_Cos(float angle, float *sin_out, float *cos_out);
+static float Fast_Atan2(float y, float x);
+static float Fast_Sqrt(float x);
+static void Clarke_Transform(float i_a, float i_b, float *i_alpha, float *i_beta);
+static void Park_Transform(float i_alpha, float i_beta, float theta, float *i_d, float *i_q);
+static void Clarke_Park_Transform(float i_a, float i_b, float theta, float *i_d, float *i_q);
+static void Calculate_Phase_Currents(uint16_t adc_u, uint16_t adc_v, uint16_t offset_u, uint16_t offset_v, float *i_a, float *i_b);
+static void SMO_Init(SMO_t *smo, BLDC_Specs_t *bldc, float sampling_time);
+static void SMO_Reset(SMO_t *smo);
+static void SMO_BLDC_Specs_Update(SMO_t *smo, BLDC_Specs_t *bldc, float sampling_time);
+static bool SMO_Update(SMO_t *smo, float v_bus, float v_alpha, float v_beta, float i_alpha_meas, float i_beta_meas);
+static void FOC_MTPA(FOC_t *foc, float Is, float *Id_ref, float *Iq_ref);
+static void FOC_BLDC_Startup_Update(FOC_t *foc);
+
+// ---------------------------------------------------------------------------
+// HF-injection (HFI) tracker for standstill and low speed, and the eSMO <-> HFI switch
+// (FOC_HFI). A +-HFI_VOLTAGE square wave at PWM_FREQ/4 (sign held 2 periods: + + - -) is
+// injected along the tracker's own d-axis estimate hfi_theta.
+// Not PWM_FREQ/2: TIM1 takes a new duty mid-period, so a sign flipped every period cancels
+// within each sampling interval (bench 2026-10-27: HF step 0.13 A instead of ~1.2 A).
+// Each period the current step (unfiltered currents) is projected on the axis applied HFI_DELAY
+// periods earlier; sliding PWM_FREQ/4 phasors of the parallel (Zp) and perpendicular (Zq) parts
+// over the last 4 periods give eps = Re(Zq conj(Zp)) / |Zp|^2 = HFI_K * sin(2 e), e = rotor d-axis
+// (saliency minimum) minus hfi_theta, independent of where in the period the duty changes.
+// A PLL drives e to 0.
+// Switching (foc->omega is the active estimator's speed):
+//   eSMO -> HFI: tracker on below HFI_OMEGA_ON (started at the eSMO angle, which fixes the N/S
+//                ambiguity), in control below HFI_OMEGA_LOW once warmed up (HFI_WARMUP) and within
+//                HFI_AGREE_ANGLE of the eSMO (else the tracker is re-seeded).
+//   HFI -> eSMO: above HFI_OMEGA_UP, after the eSMO is locked and agrees with the tracker in
+//                angle and speed for HFI_AGREE_PERIODS.
+//   Both switches blend the control angle at ANGLE_BLEND_RATE (no current-vector step).
+#define HFI_OMEGA_UP (1.3f * HFI_OMEGA_LOW) // HFI -> eSMO above this
+#define HFI_OMEGA_ON (1.6f * HFI_OMEGA_LOW) // Tracker (injection) on below this while the eSMO is in control
+#define HFI_PLL_BW (TWO_PI * 40.0f)                // Tracker PLL natural frequency (rad/s), critically damped
+#define HFI_PLL_KP (2.0f * HFI_PLL_BW)             // rad/s per rad of angle error
+#define HFI_PLL_KI (HFI_PLL_BW * HFI_PLL_BW)       // rad/s^2 per rad
+#define HFI_WARMUP ((uint32_t)(0.02f * PWM_FREQ))  // Tracker running before it may take control (20 ms)
+#define HFI_AGREE_ANGLE 0.2f                       // HFI -> eSMO: max angle difference (rad, ~11 deg)
+#define HFI_AGREE_PERIODS ((uint32_t)(0.01f * PWM_FREQ)) // ... held this long (10 ms)
+#define HFI_ZP_MIN 0.3f                            // Fault: HF response |Zp| below this (A; bench ~2.3, sim ~0.9)
+#define HFI_ERR_MAX 0.35f                          // Fault: |e| above this (rad) ...
+#define HFI_FAULT_PERIODS ((uint32_t)(0.02f * PWM_FREQ)) // ... or |Zp| low, for this long (20 ms) -> coast
+// A tracker locked on the wrong pole (theta + pi) shows a normal |Zp| and e ~ 0, but drives the
+// rotor backwards: in HFI control, rotation against rotor_dir faster than HFI_REVERSE_OMEGA for
+// HFI_REVERSE_PERIODS latches hfi_fault and coasts (the drive is motoring only).
+#define HFI_REVERSE_OMEGA 50.0f                    // Electrical rad/s
+#define HFI_REVERSE_PERIODS ((uint32_t)(0.05f * PWM_FREQ)) // 50 ms
+// Start from standstill on HFI (MOTOR_STARTUP_HFI; Align -> I-f in the shadow test, hfi_takeover false):
+//  1. Lock: zero current, tracker from theta = 0 for HFI_LOCK_TIME. It settles on the rotor's
+//     d-axis or on its opposite end (sin 2e has both as stable points).
+//  1b. Saliency probe: PLL frozen, injection HFI_PROBE_ANGLE off the tracker axis for
+//     HFI_PROBE_TIME. With saliency the error reads ~ -sin(2 * 45 deg) / 2 = -0.5 rad (scaled by
+//     the real K / HFI_K) on either end; without, ~0 and the tracker angle means nothing, so a
+//     pulse would push the rotor (sim, Lq = Ld: kicked to -319 rad/s el). Above -HFI_PROBE_MIN:
+//     no pulses, Align -> I-f.
+//  2. Polarity: id = +HFI_POL_CURRENT then -HFI_POL_CURRENT along the tracker axis (no torque on
+//     either end), HFI_POL_TIME each, |Zp| averaged over the second half of each. Current with the
+//     magnet's flux saturates the iron: smaller incremental Ld, larger HF response. If the
+//     negative pulse gives the larger |Zp| the tracker sits on the S end: add pi.
+//  3. If the two differ by less than HFI_POL_MARGIN (relative) the result is not trusted: fall
+//     back to the Align -> I-f start. Otherwise MOTOR_RUNNING with HFI in control at zero speed.
+// The pulses are short and fast, and the current stays on the angle locked before them (it does not
+// follow the tracker): a pulse on the wrong end is an unstable equilibrium, and with 30/80 ms
+// pulses that followed the tracker the sim rotor turned 17-38 deg.
+#define HFI_LOCK_TIME 0.1f           // s
+#define HFI_PROBE_ANGLE (0.25f * PI) // rad
+#define HFI_PROBE_TIME 0.01f         // s; the error is averaged over the last half
+#define HFI_PROBE_MIN 0.2f           // rad: the probe must read below -HFI_PROBE_MIN (expected -0.5)
+#define HFI_POL_SLEW 2000.0f         // id slew during the pulses (A/s): 3 ms to 6 A (current loop: 1 kHz)
+#define HFI_POL_TIME 0.012f          // s per pulse; |Zp| averaged over the last half
+#define HFI_POL_ZERO 0.006f          // s back at zero after each pulse
+
 // Force-inline the small helpers on the ISR path (FOC_Update): an out-of-line call
 // costs the call itself plus reloading every foc-> field it needs afterwards.
 #if defined(__GNUC__)
@@ -15,7 +174,7 @@
 // FUNCTION DEFINITIONS
 // ============================================================================
 // PI Controller functions
-void PI_Init(PI_Controller_t *controller, float Kp, float Ki, float sampling_time, float output_limit)
+static void PI_Init(PI_Controller_t *controller, float Kp, float Ki, float sampling_time, float output_limit)
 {
     if (controller == NULL)
     {
@@ -27,7 +186,7 @@ void PI_Init(PI_Controller_t *controller, float Kp, float Ki, float sampling_tim
 }
 
 // ---------------------------------------------------------------------------
-FOC_FAST_CODE void PI_Reset(PI_Controller_t *controller)
+FOC_FAST_CODE static void PI_Reset(PI_Controller_t *controller)
 {
     if (controller == NULL)
     {
@@ -38,7 +197,7 @@ FOC_FAST_CODE void PI_Reset(PI_Controller_t *controller)
 }
 
 // ----------------------------------------------------------------------------
-void PI_Change_Params(PI_Controller_t *controller, float Kp, float Ki, float sampling_time)
+static void PI_Change_Params(PI_Controller_t *controller, float Kp, float Ki, float sampling_time)
 {
     if (controller == NULL)
     {
@@ -63,7 +222,7 @@ void PI_Change_Params(PI_Controller_t *controller, float Kp, float Ki, float sam
 }
 
 // ----------------------------------------------------------------------------
-void PI_Set_Output_Limit(PI_Controller_t *controller, float output_limit)
+static void PI_Set_Output_Limit(PI_Controller_t *controller, float output_limit)
 {
     if (controller == NULL)
     {
@@ -102,15 +261,6 @@ FOC_INLINE float PI_Step(PI_Controller_t *controller, float error)
     return output;
 }
 
-float PI_Update(PI_Controller_t *controller, float error)
-{
-    if (controller == NULL)
-    {
-        return 0.0f;
-    }
-
-    return PI_Step(controller, error);
-}
 
 //===========================================================================
 // Trigonometric functions
@@ -147,7 +297,7 @@ static float trig_table[TRIG_TABLE_SIZE + TRIG_QUARTER + 2]; // 1282 floats, 5 K
 //----------------------------------------------------------------------------
 // Fill the table. MUST run before any trig function (FOC_Init does this).
 // sinf (not sin) keeps the double-precision libm out of the image (~5 KB flash).
-void Init_Trigonometric_Tables(void)
+static void Init_Trigonometric_Tables(void)
 {
     for (int i = 0; i < TRIG_TABLE_SIZE + TRIG_QUARTER + 2; i++)
     {
@@ -171,7 +321,7 @@ void Init_Trigonometric_Tables(void)
 // Normalize angle to [0, 2pi)
 // Fast paths cover the common cases (already in range, or one turn out) with
 // compares only; fmodf is used only for angles more than one turn out.
-FOC_FAST_CODE void Normalize_Angle(float *angle)
+FOC_FAST_CODE static void Normalize_Angle(float *angle)
 {
     float a = *angle;
 
@@ -304,7 +454,7 @@ FOC_FAST_CODE TRIG_NOINLINE static float Fast_Cos_Slow(float angle)
 
 //----------------------------------------------------------------------------
 // Sine (any angle)
-FOC_FAST_CODE float Fast_Sin(float angle)
+FOC_FAST_CODE static float Fast_Sin(float angle)
 {
     if (TRIG_UNLIKELY(!Trig_In_Range(angle)))
     {
@@ -319,7 +469,7 @@ FOC_FAST_CODE float Fast_Sin(float angle)
 
 //----------------------------------------------------------------------------
 // Cosine (any angle)
-FOC_FAST_CODE float Fast_Cos(float angle)
+FOC_FAST_CODE static float Fast_Cos(float angle)
 {
     if (TRIG_UNLIKELY(!Trig_In_Range(angle)))
     {
@@ -347,7 +497,7 @@ static inline void Trig_Interp_Sin_Cos(int i, float frac, float *sin_out, float 
 
 //---------------------------------------------------------------------------
 // Sine and cosine (any angle)
-FOC_FAST_CODE void Fast_Sin_Cos(float angle, float *sin_out, float *cos_out)
+FOC_FAST_CODE static void Fast_Sin_Cos(float angle, float *sin_out, float *cos_out)
 {
     if (TRIG_UNLIKELY(!Trig_In_Range(angle)))
     {
@@ -370,7 +520,7 @@ FOC_FAST_CODE void Fast_Sin_Cos(float angle, float *sin_out, float *cos_out)
 #define ATAN_A9 0.05264734849333763f
 #define ATAN_A11 -0.011719133704900742f
 
-FOC_FAST_CODE float Fast_Atan2(float y, float x)
+FOC_FAST_CODE static float Fast_Atan2(float y, float x)
 {
     if (isnan(x) || isnan(y))
     {
@@ -412,7 +562,7 @@ FOC_FAST_CODE float Fast_Atan2(float y, float x)
 // compiles to unless -fno-math-errno is given.
 // (The previous Newton iteration started from x itself and did not converge
 //  in 5 steps outside roughly [0.5, 50]: e.g. Fast_Sqrt(10000) was 323.)
-FOC_FAST_CODE float Fast_Sqrt(float x)
+FOC_FAST_CODE static float Fast_Sqrt(float x)
 {
     if (x <= 0.0f)
     {
@@ -490,16 +640,11 @@ FOC_INLINE void SVPWM_Core(float v_alpha, float v_beta, float v_dc, uint32_t pwm
     *pwm_w = (uint32_t)CONSTRAIN(duty_w, 0, max_pwm);
 }
 
-void SVPWM_Modulation(float v_alpha, float v_beta, float v_dc, uint32_t pwm_period,
-                      uint32_t *pwm_u, uint32_t *pwm_v, uint32_t *pwm_w)
-{
-    SVPWM_Core(v_alpha, v_beta, v_dc, pwm_period, pwm_u, pwm_v, pwm_w);
-}
 
 // ---------------------------------------------------------------------------
 // CLARKE TRANSFORM (abc → αβ)
 // Simplified Clarke (only need 2 phase currents)
-void Clarke_Transform(float i_a, float i_b, float *i_alpha, float *i_beta)
+static void Clarke_Transform(float i_a, float i_b, float *i_alpha, float *i_beta)
 {
     *i_alpha = i_a;
     *i_beta = (i_a * ONE_OVER_SQRT3) + (i_b * TWO_OVER_SQRT3);
@@ -535,12 +680,12 @@ FOC_INLINE void Park_Core(float i_alpha, float i_beta, float theta, float *i_d, 
     *i_q = -sin_theta * i_alpha + cos_theta * i_beta;
 }
 
-FOC_FAST_CODE void Park_Transform(float i_alpha, float i_beta, float theta, float *i_d, float *i_q)
+FOC_FAST_CODE static void Park_Transform(float i_alpha, float i_beta, float theta, float *i_d, float *i_q)
 {
     Park_Core(i_alpha, i_beta, theta, i_d, i_q);
 }
 
-FOC_FAST_CODE void Clarke_Park_Transform(float i_a, float i_b, float theta,
+FOC_FAST_CODE static void Clarke_Park_Transform(float i_a, float i_b, float theta,
                            float *i_d, float *i_q)
 {
     // Clarke Transform
@@ -577,17 +722,13 @@ FOC_INLINE void Inverse_Park_Core(float v_d, float v_q, float theta, float *v_al
     *v_beta = sin_theta * v_d + cos_theta * v_q;
 }
 
-void Inverse_Park_Transform(float v_d, float v_q, float theta, float *v_alpha, float *v_beta)
-{
-    Inverse_Park_Core(v_d, v_q, theta, v_alpha, v_beta);
-}
 
 // ---------------------------------------------------------------------------
 // Calculate the phase currents from ADC values
 // NOTE: *i_a and *i_b are in/out. On entry they must hold the previous filtered
 // value (they are the LPF state); on exit they hold the new filtered value.
 // Callers must pass persistent storage (e.g. &foc->i_a, &foc->i_b).
-void Calculate_Phase_Currents(uint16_t adc_u, uint16_t adc_v, uint16_t offset_u, uint16_t offset_v,
+static void Calculate_Phase_Currents(uint16_t adc_u, uint16_t adc_v, uint16_t offset_u, uint16_t offset_v,
                               float *i_a, float *i_b)
 {
     if (i_a == NULL || i_b == NULL)
@@ -671,7 +812,7 @@ static void SMO_Compute_Coefficients(SMO_t *smo, BLDC_Specs_t *bldc, float sampl
 
 // ---------------------------------------------------------------------------
 // Function to initialize SMO library
-void SMO_Init(SMO_t *smo, BLDC_Specs_t *bldc, float sampling_time)
+static void SMO_Init(SMO_t *smo, BLDC_Specs_t *bldc, float sampling_time)
 {
     if (smo == NULL || bldc == NULL)
     {
@@ -690,7 +831,7 @@ void SMO_Init(SMO_t *smo, BLDC_Specs_t *bldc, float sampling_time)
 
 // ---------------------------------------------------------------------------
 // Function to reset SMO states
-FOC_FAST_CODE void SMO_Reset(SMO_t *smo)
+FOC_FAST_CODE static void SMO_Reset(SMO_t *smo)
 {
     if (smo == NULL)
     {
@@ -714,7 +855,7 @@ FOC_FAST_CODE void SMO_Reset(SMO_t *smo)
 
 // ---------------------------------------------------------------------------
 // Function to update BLDC specifications
-void SMO_BLDC_Specs_Update(SMO_t *smo, BLDC_Specs_t *bldc, float sampling_time)
+static void SMO_BLDC_Specs_Update(SMO_t *smo, BLDC_Specs_t *bldc, float sampling_time)
 {
     if (smo == NULL || bldc == NULL)
     {
@@ -760,7 +901,7 @@ static inline float Wrap_Once(float a)
 // Outputs: smo->theta_est (rad, 0..2pi), smo->omega_est (electrical rad/s).
 // Returns true while the observer is locked (with hysteresis), false otherwise.
 // Runs in the PWM ISR: no printf in here.
-FOC_FAST_CODE bool SMO_Update(SMO_t *smo, float v_bus, float v_alpha, float v_beta, float i_alpha_meas, float i_beta_meas)
+FOC_FAST_CODE static bool SMO_Update(SMO_t *smo, float v_bus, float v_alpha, float v_beta, float i_alpha_meas, float i_beta_meas)
 {
     if (smo == NULL)
     {
@@ -921,7 +1062,10 @@ static void FOC_Precompute(FOC_t *foc)
     }
 }
 
-void FOC_Init(FOC_t *foc, uint32_t pwm_res, uint32_t adc_offset)
+// Initialise the drive: defaults from foc_lib.h, idle, bridge off. pwm_res = the PWM timer's period
+// count (100 % duty). The current-sense offsets start at V_OFFSET; overwrite foc->adc_offset_a/b with
+// measured zero-current readings before running.
+void FOC_Init(FOC_t *foc, uint32_t pwm_res)
 {
     // Initialize trigonometric tables
     Init_Trigonometric_Tables();
@@ -973,9 +1117,9 @@ void FOC_Init(FOC_t *foc, uint32_t pwm_res, uint32_t adc_offset)
     foc->startup_omega = 0.0f;
     foc->angle_offset = 0.0f;
     foc->bemf_counter = 0;
-    foc->adc_offset_a = adc_offset;
-    foc->adc_offset_b = adc_offset;
-    foc->adc_offset_c = adc_offset;
+    foc->adc_offset_a = ADC_OFFSET;
+    foc->adc_offset_b = ADC_OFFSET;
+    foc->adc_offset_c = ADC_OFFSET;
 
     // Initialize BLDC specifications
     foc->bldc.Rs = RS;
@@ -1030,6 +1174,65 @@ bool FOC_Set_Direction(FOC_t *foc, BLDC_Direction_t dir)
 
     foc->rotor_dir = dir;
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// Start the motor in FOC_SPEED_CONTROL (target: foc->speed_ref) or FOC_TORQUE_CONTROL (target:
+// foc->is_ref), both relative to the direction. The start from standstill is the HFI start, or
+// Align -> I-f (FOC_HFI 0, or no saliency). Call with the drive stopped.
+void FOC_Start(FOC_t *foc, FOC_Control_Mode_t mode)
+{
+    if (foc == NULL || (mode != FOC_SPEED_CONTROL && mode != FOC_TORQUE_CONTROL))
+    {
+        return;
+    }
+    foc->motor_mode = MOTOR_IDLE; // The startup state machine begins here
+    foc->foc_mode = mode;
+}
+
+// Stop: the next FOC_Update turns the bridge off (outputs_enabled = false) and the motor coasts
+void FOC_Stop(FOC_t *foc)
+{
+    if (foc != NULL)
+    {
+        foc->foc_mode = FOC_IDLE;
+    }
+}
+
+// Current limit (A) for the current references and the speed loop's output
+void FOC_Set_Current_Limit(FOC_t *foc, float amps)
+{
+    if (foc == NULL)
+    {
+        return;
+    }
+    foc->bldc.max_current = amps;
+    PI_Set_Output_Limit(&(foc->speed_ctrl), amps);
+}
+
+// ---------------------------------------------------------------------------
+// Start one calibration run with the motor at standstill: MOTOR_ESTIMATION_RS (two DC levels),
+// _LD or _LQ (INJECTION_FREQ sine). The injection frame is at inj_angle (0 for Rs/Ld/Lq; other
+// angles for a saliency sweep). Poll FOC_Measurement_Busy, then call the matching
+// FOC_BLDC_Parameter_Calculation_* (after both LD and LQ) or FOC_BLDC_Saliency_Point.
+// foc->inj_fault reports an over-current abort.
+void FOC_Start_Measurement(FOC_t *foc, BLDC_Mode_t which, float inj_angle)
+{
+    if (foc == NULL ||
+        (which != MOTOR_ESTIMATION_RS && which != MOTOR_ESTIMATION_LD && which != MOTOR_ESTIMATION_LQ))
+    {
+        return;
+    }
+    foc->inj_angle = inj_angle;
+    foc->foc_mode = FOC_CALIBRATION;
+    foc->motor_mode = which;
+    foc->inj_fault = false;
+    foc->inj_start_flag = true; // Last: the ISR starts the run when it sees this
+}
+
+bool FOC_Measurement_Busy(const FOC_t *foc)
+{
+    return (foc != NULL) && foc->inj_start_flag;
 }
 
 // ---------------------------------------------------------------------------
@@ -1245,7 +1448,7 @@ void FOC_Recalc_Params(FOC_t *foc)
 }
 
 // ---------------------------------------------------------------------------
-FOC_FAST_CODE void FOC_MTPA(FOC_t *foc, float Is, float *Id_ref, float *Iq_ref)
+FOC_FAST_CODE static void FOC_MTPA(FOC_t *foc, float Is, float *Id_ref, float *Iq_ref)
 {
     if (foc == NULL || Id_ref == NULL || Iq_ref == NULL)
     {
@@ -1439,19 +1642,6 @@ FOC_INLINE void Current_Loop_Core(FOC_t *foc)
     FOC_Harmonic_Comp(foc);
 }
 
-void FOC_Current_Loop_Update(FOC_t *foc)
-{
-    if (foc == NULL)
-    {
-        return;
-    }
-
-#if FOC_HFI
-    FOC_Current_Loop_HFI(foc);
-#else
-    Current_Loop_Core(foc);
-#endif
-}
 
 // ---------------------------------------------------------------------------
 // Startup procedure for BLDC motor (Open-Loop)
@@ -1750,7 +1940,7 @@ FOC_FAST_CODE static void FOC_Speed_Control(FOC_t *foc)
 //
 // Faults (observer never locks at OMEGA_FORCE, or loses lock during the
 // transition) coast the motor instead of looping back into a restart.
-FOC_FAST_CODE void FOC_BLDC_Startup_Update(FOC_t *foc)
+FOC_FAST_CODE static void FOC_BLDC_Startup_Update(FOC_t *foc)
 {
     if (foc == NULL)
     {
@@ -2209,7 +2399,7 @@ bool FOC_BLDC_Saliency_Point(const FOC_t *foc, float *L_axis, float *cross_re, f
 
 // ---------------------------------------------------------------------------
 // Measurement of BLDC parameters using pre-defined signal injection
-FOC_FAST_CODE void FOC_BLDC_Parameter_Measurement_Update(FOC_t *foc)
+FOC_FAST_CODE static void FOC_BLDC_Parameter_Measurement_Update(FOC_t *foc)
 {
     if (foc == NULL)
     {

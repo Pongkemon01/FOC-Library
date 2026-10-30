@@ -3,12 +3,12 @@
 #include <stdlib.h>
 #include <math.h>
 #include <string.h>
-#include "foc_lib.h"
+#include "foc_lib.c" /* white-box: the sims reach internal functions and constants */
 int main(int argc, char **argv)
 {
     const double Rs = RS, Ld = LS, Lq = LS * atof(argv[1]), vbus = 12.0, Ts = TS; const int SUB = 40; const double h = Ts / SUB;
     const double A_PER_LSB = ADC_2_VOLT * V_2_CURRENT; srand(5);
-    static FOC_t foc; memset(&foc, 0, sizeof foc); FOC_Init(&foc, PWM_RES, ADC_OFFSET);
+    static FOC_t foc; memset(&foc, 0, sizeof foc); FOC_Init(&foc, PWM_RES);
     double id = 0, iq = 0; uint32_t pa = PWM_RES / 2, pb = PWM_RES / 2, pc = PWM_RES / 2;
     int modes[3] = {MOTOR_ESTIMATION_RS, MOTOR_ESTIMATION_LD, MOTOR_ESTIMATION_LQ};
     for (int m = 0; m < 3; m++) {

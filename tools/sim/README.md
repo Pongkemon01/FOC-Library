@@ -14,14 +14,17 @@ A host C compiler: gcc from MSYS2 (UCRT64), MinGW-w64 or WSL. Check with `gcc --
 ```bash
 mkdir -p build-sim
 for t in startup_sim esmo_sim calib_sim saliency_sim svpwm_check pi_windup math_check normalize_check speed_sim; do
-  gcc -O2 -std=gnu99 -I Lib/foc-lib Lib/foc-lib/foc_lib.c tools/sim/$t.c -lm -o build-sim/$t
+  gcc -O2 -std=gnu99 -I Lib/foc-lib tools/sim/$t.c -lm -o build-sim/$t
 done
 ```
+
+Each tool `#include`s `foc_lib.c` (white-box: the library's internal functions and constants are
+`static` / private to it), so do not also compile `foc_lib.c`.
 
 PowerShell, one tool:
 
 ```powershell
-gcc -O2 -std=gnu99 -I Lib/foc-lib Lib/foc-lib/foc_lib.c tools/sim/startup_sim.c -lm -o build-sim/startup_sim.exe
+gcc -O2 -std=gnu99 -I Lib/foc-lib tools/sim/startup_sim.c -lm -o build-sim/startup_sim.exe
 ```
 
 HFI is always on (`FOC_HFI` 1): every start goes through `MOTOR_STARTUP_HFI` and the sim plants

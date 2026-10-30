@@ -5,6 +5,31 @@ Git history starts on 2026-10-26; this file holds the record before that and the
 status of each change (compile / sim / hardware). Newest first below; older sections are
 history (marked superseded where they no longer apply).
 
+## 2026-10-30: foc-lib refactored for portability (no behaviour change)
+
+- `foc_lib.h`: porting guide at the top, then parameters in three parts: (1) board/sensing/motor
+  values a port must provide (reference defaults kept), (2) optional tuning (port timing, HFI,
+  startup, loops, calibration levels; `IPARK_DELAY_COMP`, `CURRENT_CONTROL_F_BANDWIDTH`,
+  `SPEED_PLANT_GAIN`, `SPEED_CTRL_BW_HZ` (was SPEED_CTRL_BANDWIDTH in rad/s), `SPEED_REF_SLEW`,
+  `ESMO_OMEGA_MAX` are now `#ifndef`-guarded too), (3) fixed array sizes. Then types and the
+  public API only. Removed the unused `I_PEAK`.
+- Internal to `foc_lib.c`: math constants (`PI`, `TWO_PI`, ... no longer leak into user code,
+  e.g. CMSIS `arm_math.h` also defines `PI`), `CONSTRAIN`, derived scalings (`TS`, `ADC_2_*`,
+  `ADC_OFFSET`, `V_2_CURRENT`), gains, eSMO/HFI/calibration internals and their documentation;
+  22 helper functions are `static`; the unused wrappers `PI_Update`, `SVPWM_Modulation`,
+  `Inverse_Park_Transform`, `FOC_Current_Loop_Update` are gone.
+- API changes: `FOC_Init(foc, pwm_res)` (the offsets start at V_OFFSET's count); new `FOC_Start`,
+  `FOC_Stop`, `FOC_Set_Current_Limit`, `FOC_Start_Measurement`, `FOC_Measurement_Busy`.
+  `Src/freertos.c` uses them instead of writing foc_mode/motor_mode/inj_* or the speed PI.
+- Sims `#include "foc_lib.c"` (white-box); build each tool alone (tools/sim/README.md).
+- Verification: compile with FOC_HFI 1 and 0, -Wall -Wextra, no warnings; firmware RAM 78.5 %,
+  Flash 10.0 %; the ISR path is all in .ccmram (more of it now inlined into FOC_Update: CCM
+  0x2de8 -> 0x2d48 bytes). Sims: 25 scenario outputs (default, FOC_HFI=0, HFI scenarios, unit
+  checks) byte-identical to b5d54af except pi_windup's renamed label.
+- Bench 2026-10-30 (prop on, TEST_PROFILE 4): unchanged behaviour. Rs 0.02265, Ld/Lq 5.54/7.17 uH,
+  sweep A2 0.91 uH; HFI start probe -351 mrad, polarity kept (11 % contrast); 150 hold 149.6
+  rad/s el; HFI -> eSMO at ~451. ISR max 2213 cycles (before: 2185-2197), IRQ 2267, of 3600.
+
 ## 2026-10-30: HFI always on; saliency probe before the polarity pulses
 
 - User decision: HFI is no longer optional at run time. Removed `foc->hfi_enable` and

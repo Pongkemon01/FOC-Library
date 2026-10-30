@@ -5,7 +5,7 @@
 #include <stdlib.h>
 #include <math.h>
 #include <string.h>
-#include "foc_lib.h"
+#include "foc_lib.c" /* white-box: the sims reach internal functions and constants */
 #define SWEEP_POINTS 24
 int main(int argc, char **argv)
 {
@@ -18,7 +18,7 @@ int main(int argc, char **argv)
     const double L0 = 0.5 * (Ld + Lq), L1 = 0.5 * (Ld - Lq);
     const double Laa = L0 + L1 * cos(2 * th), Lbb = L0 - L1 * cos(2 * th), Lab = L1 * sin(2 * th);
     const double det = Laa * Lbb - Lab * Lab;
-    static FOC_t foc; memset(&foc, 0, sizeof foc); FOC_Init(&foc, PWM_RES, ADC_OFFSET);
+    static FOC_t foc; memset(&foc, 0, sizeof foc); FOC_Init(&foc, PWM_RES);
     double L[SWEEP_POINTS], xr[SWEEP_POINTS];
     for (int k = 0; k < SWEEP_POINTS; k++) {
         double ia = 0, ib = 0; uint32_t pa = PWM_RES / 2, pb = PWM_RES / 2, pc = PWM_RES / 2;

@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
-#include "foc_lib.h"
+#include "foc_lib.c" /* white-box: the sims reach internal functions and constants */
 #ifdef _WIN32
 #define NULL_DEVICE "NUL"
 #else

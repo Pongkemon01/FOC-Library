@@ -13,7 +13,7 @@
 #include <stdlib.h>
 #include <math.h>
 #include <string.h>
-#include "foc_lib.h"
+#include "foc_lib.c" /* white-box: the sims reach internal functions and constants */
 
 static double wrap(double x) { x = fmod(x + M_PI, 2 * M_PI); if (x < 0) x += 2 * M_PI; return x - M_PI; }
 static double lsb_noise(void) { return (double)((rand() % 5) - 2); }
@@ -49,7 +49,7 @@ int main(int argc, char **argv)
 
     static FOC_t foc;
     memset(&foc, 0, sizeof foc);
-    FOC_Init(&foc, PWM_RES, ADC_OFFSET);
+    FOC_Init(&foc, PWM_RES);
     foc.bldc.Ld = (float)Ld; foc.bldc.Lq = (float)Lq; FOC_Recalc_Params(&foc);
     foc.foc_mode = FOC_TORQUE_CONTROL;
     foc.motor_mode = MOTOR_IDLE;

@@ -31,7 +31,7 @@
 #include <stdlib.h>
 #include <math.h>
 #include <string.h>
-#include "foc_lib.h"
+#include "foc_lib.c" /* white-box: the sims reach internal functions and constants */
 
 static double HD, HP; /* back-EMF -6 / +6 harmonic fractions (env HD, HP) */
 static double rs_n[2], rs_d[2], rs_dd[2], rs_q[2], rs_qq[2];
@@ -67,7 +67,7 @@ int main(int argc, char **argv)
 
     static FOC_t foc;
     memset(&foc, 0, sizeof foc);
-    FOC_Init(&foc, PWM_RES, ADC_OFFSET);
+    FOC_Init(&foc, PWM_RES);
     foc.bldc.Ld = (float)Ld; foc.bldc.Lq = (float)Lq;
     /* controller parameter mismatch: LD_EST / RS_EST are what calibration "measured" */
     if (getenv("LD_EST")) foc.bldc.Ld = foc.bldc.Lq = (float)atof(getenv("LD_EST"));
@@ -95,7 +95,7 @@ int main(int argc, char **argv)
     if (getenv("SHADOW") && atoi(getenv("SHADOW"))) foc.hfi_takeover = false;
     const int prof_start = getenv("PROF") && !strcmp(getenv("PROF"), "start");
     const double sat = getenv("SAT") ? atof(getenv("SAT")) : 0.0;
-if (getenv("IMAX")) { foc.bldc.max_current = (float)atof(getenv("IMAX")); PI_Set_Output_Limit(&foc.speed_ctrl, foc.bldc.max_current); } /* test current cap */
+if (getenv("IMAX")) FOC_Set_Current_Limit(&foc, (float)atof(getenv("IMAX"))); /* test current cap */
     const double seed = getenv("SEED") ? atof(getenv("SEED")) * M_PI / 180 : 0;
     double hfi_e_sum = 0, hfi_e_max = 0, hfi_q_sum = 0; long hfi_e_n = 0;
     int last_on = 0, last_ctrl = 0;

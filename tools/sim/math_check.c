@@ -5,7 +5,7 @@
 #include <float.h>
 #include <stdint.h>
 #include <string.h>
-#include "foc_lib.h"
+#include "foc_lib.c" /* white-box: the sims reach internal functions and constants */
 
 static float rnd_float_any(void){ uint32_t u = ((uint32_t)rand() << 16) ^ (uint32_t)rand(); float f; memcpy(&f, &u, 4); return f; }
 static double urand(double lo, double hi){ return lo + (hi - lo) * (rand() / (double)RAND_MAX); }

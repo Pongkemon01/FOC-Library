@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
-#include "foc_lib.h"
+#include "foc_lib.c" /* white-box: the sims reach internal functions and constants */
 static double ref(float a){ double t = 2*M_PI, r = fmod((double)a, t); if (r < 0) r += t; return r; }   /* exact w.r.t. TRUE 2pi */
 static double aerr(double x, double r){ double e = fabs(x - r); return fmin(e, 2*M_PI - e); }       /* angular distance */
 int main(void){ srand(9);

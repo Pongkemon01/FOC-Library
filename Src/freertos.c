@@ -64,6 +64,8 @@
                        // 4: HFI from standstill (11 s): 150 to 5 s (with a prop, the start
                        //    accelerates its inertia at the current cap; the hold may be braked by hand),
                        //    0 from 5 s, 150 from 6.5 s, 1500 from 8 s (HFI -> eSMO)
+#define APP_PI 3.14159265359f // For log conversions (foc-lib keeps its constants internal)
+#define APP_TWO_PI 6.28318530718f
 #define TEST_I_MAX 5.0f // Speed-test current cap (A): iq_ref and the speed PI output (default I_RATED)
 
 /* USER CODE END PD */
@@ -252,7 +254,7 @@ void MX_FREERTOS_Init(void)
 {
     /* USER CODE BEGIN Init */
     TIMER_config(&htim1, &foc, PWM_FREQ);           // Re-configure timer for desired PWM frequency
-    FOC_Init(&foc, foc.pwm_resolution, ADC_OFFSET); // Initialize FOC structure
+    FOC_Init(&foc, foc.pwm_resolution);             // Initialize FOC structure (pwm_resolution from TIMER_config)
 
     // DWT cycle counter for the ISR timing measurement
     CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
@@ -345,12 +347,9 @@ void StartDefaultTask(void *argument)
         for (;;)
             osDelay(1000);
     }
-    foc.foc_mode = FOC_CALIBRATION;
-    foc.motor_mode = MOTOR_ESTIMATION_RS;
-    foc.inj_fault = false;
-    foc.inj_start_flag = true;
+    FOC_Start_Measurement(&foc, MOTOR_ESTIMATION_RS, 0.0f);
     printf("Measuring Rs....\r\n");
-    while (foc.inj_start_flag)
+    while (FOC_Measurement_Busy(&foc))
         osDelay(1);
     printf("Finish measuring.\r\n");
     if (foc.inj_fault)
@@ -385,23 +384,17 @@ void StartDefaultTask(void *argument)
         printf("  i_d first/last 32 samples of the high level: %f / %f A\r\n", first / 32.0f, last / 32.0f);
     }
 
-    foc.foc_mode = FOC_CALIBRATION;
-    foc.motor_mode = MOTOR_ESTIMATION_LD;
-    foc.inj_fault = false;
-    foc.inj_start_flag = true;
+    FOC_Start_Measurement(&foc, MOTOR_ESTIMATION_LD, 0.0f);
     printf("Measuring Ld....\r\n");
-    while (foc.inj_start_flag)
+    while (FOC_Measurement_Busy(&foc))
         osDelay(1);
     printf("Finish measuring.\r\n");
     if (foc.inj_fault)
         printf("  !! ABORTED on over-current - Ld invalid\r\n");
 
-    foc.foc_mode = FOC_CALIBRATION;
-    foc.motor_mode = MOTOR_ESTIMATION_LQ;
-    foc.inj_fault = false;
-    foc.inj_start_flag = true;
+    FOC_Start_Measurement(&foc, MOTOR_ESTIMATION_LQ, 0.0f);
     printf("Measuring Lq....\r\n");
-    while (foc.inj_start_flag)
+    while (FOC_Measurement_Busy(&foc))
         osDelay(1);
     printf("Finish measuring.\r\n");
     if (foc.inj_fault)
@@ -424,20 +417,15 @@ void StartDefaultTask(void *argument)
                SWEEP_POINTS, (double)INJECTION_VOLTAGE);
         for (int k = 0; k < SWEEP_POINTS && sw_ok; k++)
         {
-            foc.inj_angle = (float)k * (TWO_PI / SWEEP_POINTS);
-            foc.foc_mode = FOC_CALIBRATION;
-            foc.motor_mode = MOTOR_ESTIMATION_LD;
-            foc.inj_fault = false;
-            foc.inj_start_flag = true;
-            while (foc.inj_start_flag)
+            FOC_Start_Measurement(&foc, MOTOR_ESTIMATION_LD, (float)k * (APP_TWO_PI / SWEEP_POINTS));
+            while (FOC_Measurement_Busy(&foc))
                 osDelay(1);
             sw_ok = !foc.inj_fault && FOC_BLDC_Saliency_Point(&foc, &sw_L[k], &sw_xr[k], &sw_xi[k]);
             if (sw_ok)
                 printf("  %3d  %6d  %6d  %6d\r\n", k * 360 / SWEEP_POINTS, (int)(sw_L[k] * 1e9f),
                        (int)(sw_xr[k] * 1e4f), (int)(sw_xi[k] * 1e4f));
         }
-        foc.inj_angle = 0.0f;
-
+        
         if (!sw_ok)
             printf("  !! sweep aborted (over-current or no current)\r\n");
         else
@@ -445,7 +433,7 @@ void StartDefaultTask(void *argument)
             float s0 = 0, c1 = 0, s1 = 0, c2 = 0, s2 = 0, xc2 = 0, xs2 = 0;
             for (int k = 0; k < SWEEP_POINTS; k++)
             {
-                float p = (float)k * (TWO_PI / SWEEP_POINTS);
+                float p = (float)k * (APP_TWO_PI / SWEEP_POINTS);
                 s0 += sw_L[k];
                 c1 += sw_L[k] * cosf(p);
                 s1 += sw_L[k] * sinf(p);
@@ -463,14 +451,14 @@ void StartDefaultTask(void *argument)
             float res = 0.0f;
             for (int k = 0; k < SWEEP_POINTS; k++)
             {
-                float p = (float)k * (TWO_PI / SWEEP_POINTS);
+                float p = (float)k * (APP_TWO_PI / SWEEP_POINTS);
                 float fit = A0 + 2.0f / n * (c1 * cosf(p) + s1 * sinf(p) + c2 * cosf(2.0f * p) + s2 * sinf(2.0f * p));
                 res += (sw_L[k] - fit) * (sw_L[k] - fit);
             }
             res = sqrtf(res / n);
 
             printf("  fit: L0 %d nH, A2 %d nH (min-L axis %d deg el, mod 180), A1 %d nH, residual rms %d nH\r\n",
-                   (int)(A0 * 1e9f), (int)(A2 * 1e9f), (int)((p2 + 0.5f * PI) * (180.0f / PI)) % 180,
+                   (int)(A0 * 1e9f), (int)(A2 * 1e9f), (int)((p2 + 0.5f * APP_PI) * (180.0f / APP_PI)) % 180,
                    (int)(A1 * 1e9f), (int)(res * 1e9f));
             printf("  -> Ld ~ %d nH, Lq ~ %d nH; cross-axis 2nd harmonic %d x1e-4 of the axis current\r\n",
                    (int)((A0 - A2) * 1e9f), (int)((A0 + A2) * 1e9f), (int)(X2 * 1e4f));
@@ -487,16 +475,14 @@ void StartDefaultTask(void *argument)
     // FOC_CALIBRATION keeps the bridge enabled (zero vector) after the last injection, and the
     // direction can only be set with the bridge off: go idle first (the ISR turns the outputs
     // off within one PWM period), then set the direction, then start.
-    foc.foc_mode = FOC_IDLE;
+    FOC_Stop(&foc);
     osDelay(2);
     if (!FOC_Set_Direction(&foc, RUN_DIRECTION))
         printf("!! FOC_Set_Direction refused (bridge energized)\r\n");
     foc.speed_ref = 1500.0f;
-    foc.bldc.max_current = TEST_I_MAX;
-    PI_Set_Output_Limit(&foc.speed_ctrl, TEST_I_MAX);
+    FOC_Set_Current_Limit(&foc, TEST_I_MAX);
     foc.hfi_takeover = !HFI_SHADOW_TEST; // Test only (see HFI_SHADOW_TEST)
-    foc.motor_mode = MOTOR_IDLE;
-    foc.foc_mode = FOC_SPEED_CONTROL;
+    FOC_Start(&foc, FOC_SPEED_CONTROL);
 
     // Log the drive state at ~50 Hz for the TEST_PROFILE duration (task context, never from the ISR). Integers only
     // (rad/s, mV, mA) to keep printf's stack use low on this task's 512 B stack.
@@ -577,13 +563,13 @@ void StartDefaultTask(void *argument)
                (int)irq_cyc_last);
         // Separate call: fewer varargs per printf on this task's 512 B stack
         float smo_hfi = foc.smo.theta_est - foc.hfi_theta;
-        if (smo_hfi > PI)
-            smo_hfi -= TWO_PI;
-        else if (smo_hfi < -PI)
-            smo_hfi += TWO_PI;
+        if (smo_hfi > APP_PI)
+            smo_hfi -= APP_TWO_PI;
+        else if (smo_hfi < -APP_PI)
+            smo_hfi += APP_TWO_PI;
         printf(" %d %d %d %d %d %d %d\r\n", (int)foc.hfi_on, (int)foc.hfi_control,
-               (int)(smo_hfi * (1800.0f / PI)), (int)foc.hfi_omega, (int)(foc.hfi_zp * 1000.0f),
-               (int)(foc.hfi_err * (1800.0f / PI)), (int)foc.hfi_fault);
+               (int)(smo_hfi * (1800.0f / APP_PI)), (int)foc.hfi_omega, (int)(foc.hfi_zp * 1000.0f),
+               (int)(foc.hfi_err * (1800.0f / APP_PI)), (int)foc.hfi_fault);
         osDelay(20);
     }
     printf("ISR cycles: max %lu, budget %lu per period (%d Hz PWM)\r\n", (unsigned long)isr_cyc_max,
@@ -591,9 +577,8 @@ void StartDefaultTask(void *argument)
     printf("IRQ cycles (handler entry to callback end): max %lu\r\n", (unsigned long)irq_cyc_max);
     printf("Stopping FOC control... (vbus_fault = %d, vbus_uv_fault = %d)\r\n", (int)foc.vbus_fault,
            (int)foc.vbus_uv_fault);
-    foc.foc_mode = FOC_IDLE;
-    foc.bldc.max_current = I_RATED;
-    PI_Set_Output_Limit(&foc.speed_ctrl, I_RATED);
+    FOC_Stop(&foc);
+    FOC_Set_Current_Limit(&foc, I_RATED);
     // Coast check: the rotor is still spinning down here; ia/ib must stay ~0 with moe = 0
     for (int k = 0; k < 25; k++)
     {
