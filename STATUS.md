@@ -5,6 +5,38 @@ Git history starts on 2026-10-26; this file holds the record before that and the
 status of each change (compile / sim / hardware). Newest first below; older sections are
 history (marked superseded where they no longer apply).
 
+## 2026-10-30: threshold from data; standstill start on HFI (N/S polarity)
+
+- `HFI_OMEGA_LOW` 293 -> **300 rad/s el** (409 rpm), derived from the stage-1 shadow log with the
+  new `tools/hfi_threshold.py` (bins smo_hfi by eSMO speed; lowest speed above which the spread
+  stays within 1.5x the fastest bins' spread: 275-300 depending on bin width; 300 taken). Re-run
+  the script on a new shadow log (RUN_HFI 1, TEST_PROFILE 3) for another motor or setup.
+- `MOTOR_STARTUP_HFI` (new mode 9, appended so log mode numbers stay), with `foc->hfi_start`
+  (+ hfi_enable, hfi_takeover): tracker locks from theta = 0 at zero current (100 ms), then
+  +/-`HFI_POL_CURRENT` d-axis pulses (12 ms each, 2000 A/s slew, current held on the locked angle)
+  and compares |Zp| (larger with the magnet's flux: saturation); flips the tracker by pi if the
+  negative pulse wins; below `HFI_POL_MARGIN` (2 %) contrast it falls back to Align -> I-f.
+  Then MOTOR_RUNNING with HFI in control at zero speed (eSMO reset, takes over above UP).
+  Total ~136 ms. Longer pulses (30/80 ms) that followed the tracker turned the sim rotor 17-38 deg
+  (a pulse on the wrong end is an unstable equilibrium); the short fixed-angle pulses do not.
+- Sim (`speed_sim` new options HSTART, SAT (d-axis saturation model), PROF=start, IMAX): with
+  SAT 0.01 / 0.005 per A the rotor (at 114 deg, so the tracker first locks on the S end) is
+  detected and flipped (|Zp| contrast 12 % / 6 %), runs from 0 to 150 on HFI, eSMO at ~424-430;
+  with no saturation it falls back to Align -> I-f; with the prop inertia at a 5 A cap it
+  accelerates under HFI at up to 3.7 A and hands over at the cap. HFI off: all sims identical.
+- `Src/freertos.c`: `RUN_HFI 3` (standstill start on HFI), `TEST_PROFILE 4` (150, 0 from 5 s,
+  150 from 6.5 s, 1500 from 8 s), prints the polarity result. Compile: RAM 78.5 %, Flash 10.0 %.
+- **Bench 2026-10-30 (10x4.7 prop on, RUN_HFI 3, TEST_PROFILE 4, 5 A cap): hardware-verified, no
+  fault.** Polarity: |Zp| +pulse 3.010 A, -pulse 2.726 A (5 A pulses, capped): **10 % contrast**,
+  5x the 2 % margin; kept (+1), confirmed right (forward start, eSMO later agrees within a few deg).
+  Standstill -> RUNNING on HFI in ~0.15 s; accelerated the prop under HFI at up to ~2.9 A (overshoot
+  to ~199 rad/s el: motoring only), then 150 hold: HFI speed 149.4 +- 6.0, eSMO - HFI -3.1 +- 2.7
+  deg, tracker error rms 3.6 deg, iq 0.52 A. 0 hold: 0.0 +- 1.2. 150 again, then 150 -> 1500 under
+  HFI at the cap (logged iq up to 4.74 A with HFI in control), **HFI -> eSMO at ~449 rad/s el**,
+  normal 1500 hold. ISR max 2185 cycles of 3600.
+  Load coverage: inertia (acceleration) load up to ~4.7 A under HFI; a steady load at low speed was
+  not applied (prop drag at 150 rad/s el is negligible; no hand brake this run).
+
 ## 2026-10-30: eSMO <-> HFI switching during MOTOR_RUNNING (step 3 of the HFI plan)
 
 - The passive delta-sweep estimator is replaced by an HFI **tracker** that can steer:

@@ -233,15 +233,17 @@
 //   HFI -> eSMO: above HFI_OMEGA_UP, after the eSMO is locked and agrees with the tracker in
 //                angle and speed for HFI_AGREE_PERIODS.
 //   Both switches blend the control angle at ANGLE_BLEND_RATE (no current-vector step).
-// HFI_OMEGA_LOW is the eSMO's lowest trusted speed (checked on the bench, see its definition): with the tracker
+// HFI_OMEGA_LOW is the eSMO's lowest trusted speed, measured on the bench: with the tracker
 // running alongside the eSMO (below HFI_OMEGA_ON) log their angle difference against speed and
-// set it where the difference starts to grow.
+// set it where the difference starts to grow (tools/hfi_threshold.py on a RUN_HFI 1 / TEST_PROFILE 3
+// log).
 #ifndef HFI_VOLTAGE
 #define HFI_VOLTAGE 0.075f // Square-wave amplitude (V)
 #endif
 #ifndef HFI_OMEGA_LOW
-#define HFI_OMEGA_LOW 293.0f // eSMO -> HFI below this |omega| (electrical rad/s): 400 rpm at 7 pole pairs.
-                             // Bench shadow sweep 2026-10-30: eSMO-HFI spread grows below ~300 (STATUS.md)
+#define HFI_OMEGA_LOW 300.0f // eSMO -> HFI below this |omega| (electrical rad/s; 409 rpm at 7 pole pairs).
+                             // From the bench shadow sweep 2026-10-30 via tools/hfi_threshold.py: the
+                             // eSMO-HFI spread stays within 1.5x its high-speed value down to 275-300.
 #endif
 #define HFI_OMEGA_UP (1.3f * HFI_OMEGA_LOW) // HFI -> eSMO above this
 #define HFI_OMEGA_ON (1.6f * HFI_OMEGA_LOW) // Tracker (injection) on below this while the eSMO is in control
@@ -263,6 +265,28 @@
 // HFI_REVERSE_PERIODS latches hfi_fault and coasts (the drive is motoring only).
 #define HFI_REVERSE_OMEGA 50.0f                    // Electrical rad/s
 #define HFI_REVERSE_PERIODS ((uint32_t)(0.05f * PWM_FREQ)) // 50 ms
+// Start from standstill on HFI (MOTOR_STARTUP_HFI, foc->hfi_start with hfi_enable and hfi_takeover):
+//  1. Lock: zero current, tracker from theta = 0 for HFI_LOCK_TIME. It settles on the rotor's
+//     d-axis or on its opposite end (sin 2e has both as stable points).
+//  2. Polarity: id = +HFI_POL_CURRENT then -HFI_POL_CURRENT along the tracker axis (no torque on
+//     either end), HFI_POL_TIME each, |Zp| averaged over the second half of each. Current with the
+//     magnet's flux saturates the iron: smaller incremental Ld, larger HF response. If the
+//     negative pulse gives the larger |Zp| the tracker sits on the S end: add pi.
+//  3. If the two differ by less than HFI_POL_MARGIN (relative) the result is not trusted: fall
+//     back to the Align -> I-f start. Otherwise MOTOR_RUNNING with HFI in control at zero speed.
+#define HFI_LOCK_TIME 0.1f    // s
+#ifndef HFI_POL_CURRENT
+#define HFI_POL_CURRENT 6.0f  // A (standstill, d-axis: no torque; ~1.2 W in Rs)
+#endif
+// The pulses are short and fast, and the current stays on the angle locked in stage 0 (it does not
+// follow the tracker): a pulse on the wrong end is an unstable equilibrium, and with 30/80 ms
+// pulses that followed the tracker the sim rotor turned 17-38 deg.
+#define HFI_POL_SLEW 2000.0f  // id slew during the pulses (A/s): 3 ms to 6 A (current loop: 1 kHz)
+#define HFI_POL_TIME 0.012f   // s per pulse; |Zp| averaged over the last half
+#define HFI_POL_ZERO 0.006f   // s back at zero after each pulse
+#ifndef HFI_POL_MARGIN
+#define HFI_POL_MARGIN 0.02f  // Minimum relative |Zp| difference to trust the polarity
+#endif
 
 // ---------------------------------------------------------------------------
 // FOC control parameters
@@ -314,7 +338,11 @@ typedef enum
     MOTOR_STARTUP_TRANSITION, // Observer angle + decaying offset, startup current
 
     // Closed-loop modes
-    MOTOR_RUNNING
+    MOTOR_RUNNING,
+
+    // Startup from standstill on HFI (foc->hfi_start): lock, N/S polarity, then MOTOR_RUNNING.
+    // Last, so the existing mode numbers (logs) do not change.
+    MOTOR_STARTUP_HFI
 } BLDC_Mode_t;
 
 // FOC Control Modes
@@ -480,10 +508,15 @@ typedef struct
     float id_inj_buff[INJECTION_ROUNDS]; // Buffer for measured currents
     float iq_inj_buff[INJECTION_ROUNDS];
 
-    // HFI tracker and eSMO <-> HFI switch (see HFI_VOLTAGE). hfi_enable is written by the
-    // application; the rest is ISR state.
+    // HFI tracker and eSMO <-> HFI switch (see HFI_VOLTAGE). hfi_enable, hfi_takeover and
+    // hfi_start are written by the application; the rest is ISR state.
     bool hfi_enable;                // Allow the HFI low-speed mode
-bool hfi_takeover;              // false: tracker only (shadow run, logs eSMO vs HFI), never in control
+    bool hfi_takeover;              // false: tracker only (shadow run, logs eSMO vs HFI), never in control
+    bool hfi_start;                 // Start from standstill on HFI (MOTOR_STARTUP_HFI) instead of Align -> I-f
+    uint8_t hfi_stage;              // MOTOR_STARTUP_HFI stage: 0 lock, 1 +pulse, 2 zero, 3 -pulse, 4 zero
+    int8_t hfi_pol;                 // Polarity result: +1 kept, -1 flipped by pi, 0 not trusted (Align -> I-f)
+    uint32_t hfi_pol_n;             // Samples in the current |Zp| average
+    float hfi_zp_pos, hfi_zp_neg;   // Mean |Zp| (A) during the +/- pulses, diagnostic
     bool hfi_on;                    // Tracker running (injecting)
     bool hfi_control;               // true: the transforms use the HFI angle; false: the eSMO's
     bool hfi_fault;                 // Latched: lost the HF response or the track (coasted)
@@ -491,7 +524,7 @@ bool hfi_takeover;              // false: tracker only (shadow run, logs eSMO vs
     uint32_t hfi_idx;               // Square-wave phase 0..3 (sign + for 0, 1)
     uint32_t hfi_agree_cnt;         // HFI -> eSMO: consecutive periods of agreement
     uint32_t hfi_fault_cnt;         // Consecutive periods with a bad HF response or a large error
-uint32_t hfi_rev_cnt;           // Consecutive periods of rotation against rotor_dir in HFI control
+    uint32_t hfi_rev_cnt;           // Consecutive periods of rotation against rotor_dir in HFI control
     float hfi_theta;                // Tracker angle (rad el, 0..2pi): rotor d-axis estimate
     float hfi_omega;                // Tracker speed (PLL integrator, electrical rad/s)
     float hfi_phi_h[HFI_DELAY];     // Applied injection axis angle (alpha-beta), [0] = newest

@@ -995,6 +995,8 @@ void FOC_Init(FOC_t *foc, uint32_t pwm_res, uint32_t adc_offset)
     foc->inj_angle = 0.0f;
     foc->hfi_enable = false;
     foc->hfi_takeover = true;
+    foc->hfi_start = false;
+    foc->hfi_pol = 0;
     foc->hfi_on = false;
     foc->hfi_control = false;
     foc->hfi_fault = false;
@@ -1139,7 +1141,8 @@ FOC_FAST_CODE void FOC_Update(FOC_t *foc)
         case MOTOR_STARTUP_ALIGN:
         case MOTOR_STARTUP_RAMP:
         case MOTOR_STARTUP_TRANSITION:
-            // Align -> I-f ramp -> transition (all current-controlled)
+        case MOTOR_STARTUP_HFI:
+            // Align -> I-f ramp -> transition, or the HFI start (all current-controlled)
             FOC_BLDC_Startup_Update(foc);
             break;
 
@@ -1480,15 +1483,16 @@ static inline float Wrap_Pm_Pi(float a)
 }
 
 // ---------------------------------------------------------------------------
-// HFI tracker (see HFI_VOLTAGE in foc_lib.h). Started at the eSMO's angle and speed.
-FOC_FAST_CODE static void HFI_Start(FOC_t *foc)
+// HFI tracker (see HFI_VOLTAGE in foc_lib.h). Started at the eSMO's angle and speed while running,
+// at 0 from standstill (MOTOR_STARTUP_HFI).
+FOC_FAST_CODE static void HFI_Start(FOC_t *foc, float theta, float omega)
 {
     foc->hfi_on = true;
     foc->hfi_cnt = 0;
     foc->hfi_idx = 0;
     foc->hfi_fault_cnt = 0;
-    foc->hfi_theta = foc->smo.theta_est;
-    foc->hfi_omega = foc->smo.omega_est;
+    foc->hfi_theta = theta;
+    foc->hfi_omega = omega;
     for (int j = 0; j < 4; j++)
     {
         foc->hfi_par[j] = 0.0f;
@@ -1600,7 +1604,7 @@ FOC_FAST_CODE static void FOC_Current_Loop_HFI(FOC_t *foc)
             FOC_Coast(foc); // No angle source left at this speed
             return;
         }
-        HFI_Start(foc); // Not in control: restart from the eSMO
+        HFI_Start(foc, foc->smo.theta_est, foc->smo.omega_est); // Not in control: restart from the eSMO
     }
 
     if (!foc->hfi_control)
@@ -1613,7 +1617,7 @@ FOC_FAST_CODE static void FOC_Current_Loop_HFI(FOC_t *foc)
         const float w = fabsf(foc->smo.omega_est);
         if (!foc->hfi_on && w < HFI_OMEGA_ON)
         {
-            HFI_Start(foc);
+            HFI_Start(foc, foc->smo.theta_est, foc->smo.omega_est);
         }
         else if (foc->hfi_on && w > 1.1f * HFI_OMEGA_ON)
         {
@@ -1633,7 +1637,7 @@ FOC_FAST_CODE static void FOC_Current_Loop_HFI(FOC_t *foc)
             {
                 // The tracker disagrees with the still-trusted eSMO (e.g. locked on the wrong
                 // pole): re-seed it rather than hand it the motor
-                HFI_Start(foc);
+                HFI_Start(foc, foc->smo.theta_est, foc->smo.omega_est);
             }
         }
     }
@@ -1767,8 +1771,133 @@ FOC_FAST_CODE void FOC_BLDC_Startup_Update(FOC_t *foc)
         SMO_Reset(&(foc->smo));
         Harm_Reset(foc);
         foc->outputs_enabled = true;
-        foc->motor_mode = MOTOR_STARTUP_ALIGN;
+        if (foc->hfi_enable && foc->hfi_takeover && foc->hfi_start)
+        {
+            HFI_Start(foc, 0.0f, 0.0f);
+            foc->hfi_stage = 0;
+            foc->hfi_pol = 0;
+            foc->hfi_pol_n = 0;
+            foc->hfi_zp_pos = 0.0f;
+            foc->hfi_zp_neg = 0.0f;
+            foc->motor_mode = MOTOR_STARTUP_HFI;
+        }
+        else
+        {
+            foc->motor_mode = MOTOR_STARTUP_ALIGN;
+        }
         break;
+
+    case MOTOR_STARTUP_HFI:
+    {
+        // See HFI_LOCK_TIME in foc_lib.h: lock, +pulse, zero, -pulse, zero, then decide
+        if (!HFI_Track(foc))
+        {
+            foc->hfi_fault = true;
+            FOC_Coast(foc);
+            return;
+        }
+        foc->startup_timer += ts;
+
+        const uint8_t stage = foc->hfi_stage;
+        const bool pulse = (stage == 1u || stage == 3u);
+        const float id_target = (stage == 1u) ? HFI_POL_CURRENT : (stage == 3u) ? -HFI_POL_CURRENT : 0.0f;
+        const float t_end = (stage == 0u) ? HFI_LOCK_TIME : pulse ? HFI_POL_TIME : HFI_POL_ZERO;
+
+        // |Zp| sums over the second half of each pulse (averaged at the end of the pulse)
+        if (pulse && foc->startup_timer >= 0.5f * HFI_POL_TIME)
+        {
+            if (stage == 1u)
+            {
+                foc->hfi_zp_pos += foc->hfi_zp;
+            }
+            else
+            {
+                foc->hfi_zp_neg += foc->hfi_zp;
+            }
+            foc->hfi_pol_n++;
+        }
+
+        // Lock: follow the tracker (no current). Pulses: the angle locked at the end of stage 0.
+        foc->theta = (stage == 0u) ? foc->hfi_theta : foc->startup_theta;
+        foc->omega = 0.0f;
+        foc->id_ref = Slew_To(foc->id_ref, id_target, HFI_POL_SLEW * ts);
+        foc->iq_ref = 0.0f;
+        Clarke_Transform(foc->i_a, foc->i_b, &(foc->i_alpha), &(foc->i_beta));
+        FOC_Current_Control(foc);
+        HFI_Inject(foc);
+
+        if (foc->startup_timer < t_end)
+        {
+            break;
+        }
+        foc->startup_timer = 0.0f;
+        if (stage == 0u)
+        {
+            foc->startup_theta = foc->hfi_theta;
+        }
+        if (pulse)
+        {
+            const float n = (foc->hfi_pol_n > 0u) ? (float)foc->hfi_pol_n : 1.0f;
+            if (stage == 1u)
+            {
+                foc->hfi_zp_pos /= n;
+            }
+            else
+            {
+                foc->hfi_zp_neg /= n;
+            }
+            foc->hfi_pol_n = 0;
+        }
+        if (stage < 4u)
+        {
+            foc->hfi_stage = stage + 1u;
+            break;
+        }
+
+        // Decide. The pulse with the magnet's flux gives the larger HF response.
+        const float pos = foc->hfi_zp_pos, neg = foc->hfi_zp_neg;
+        const float hi = (pos > neg) ? pos : neg;
+        if (hi - ((pos > neg) ? neg : pos) < HFI_POL_MARGIN * hi)
+        {
+            // Not trusted: the usual Align -> I-f start (the rotor has not moved)
+            foc->hfi_pol = 0;
+            foc->hfi_on = false;
+            foc->motor_mode = MOTOR_STARTUP_ALIGN;
+            break;
+        }
+        if (neg > pos)
+        {
+            // On the S end: turn the tracker (and its history) by pi
+            foc->hfi_pol = -1;
+            foc->hfi_theta = Wrap_Once(foc->hfi_theta + PI);
+            for (int j = 0; j < (int)HFI_DELAY; j++)
+            {
+                foc->hfi_phi_h[j] = Wrap_Once(foc->hfi_phi_h[j] + PI);
+            }
+            for (int j = 0; j < 4; j++)
+            {
+                foc->hfi_par[j] = -foc->hfi_par[j];
+                foc->hfi_perp[j] = -foc->hfi_perp[j];
+            }
+        }
+        else
+        {
+            foc->hfi_pol = 1;
+        }
+
+        // Run on HFI from zero speed; the eSMO starts fresh and takes over above HFI_OMEGA_UP
+        SMO_Reset(&(foc->smo));
+        foc->theta = foc->hfi_theta;
+        foc->hfi_control = true;
+        foc->angle_offset = 0.0f;
+        foc->hfi_agree_cnt = 0;
+        foc->hfi_rev_cnt = 0;
+        foc->speed_ctrl.integral = 0.0f;
+        foc->speed_ref_ramp = 0.0f;
+        foc->speed_div = 0;
+        foc->motor_mode = MOTOR_RUNNING;
+        break;
+    }
 
     case MOTOR_STARTUP_ALIGN:
         foc->startup_timer += ts;

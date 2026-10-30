@@ -15,6 +15,10 @@
  *   HFI      time (s) to set foc.hfi_enable (eSMO <-> HFI switching); prints each switch and,
  *            every 0.1 s while enabled, the TRUE rotor-minus-control angle (mean, max |.|)
  *   PROF     "low": speed_ref 1500, 150 from 2 s, 0 from 5 s, 1500 from 7 s (instead of 1500/2500);
+ *            "start": 150 from standstill, 1500 from 3 s (with HSTART=1: HFI start)
+ *   HSTART   1: foc.hfi_enable and foc.hfi_start (standstill start on HFI, N/S polarity pulses)
+ *   IMAX     current cap (A) as TEST_I_MAX in freertos.c
+ *   SAT      d-axis saturation: incremental Ld = Ld * (1 - SAT * id), clamped 0.5..1.5 (per A)
  *            "bench": the freertos.c TEST_PROFILE 2 schedule (150 from 2.5 s, 0 from 8.5 s, 1500 from 10 s)
  *   SHADOW   1: foc.hfi_takeover = false (tracker runs alongside the eSMO, never in control)
  *   SEED     offset (deg) added to the HFI tracker's start angle (sign / pull-in test)
@@ -45,6 +49,7 @@ static const char *mode_name(int m)
     case MOTOR_STARTUP_TRANSITION: return "TRANSITION";
 #endif
     case MOTOR_RUNNING: return "RUNNING";
+    case MOTOR_STARTUP_HFI: return "HFI_START";
     default: return "?";
     }
 }
@@ -90,6 +95,10 @@ int main(int argc, char **argv)
     const int prof_low = getenv("PROF") && !strcmp(getenv("PROF"), "low");
     const int prof_bench = getenv("PROF") && !strcmp(getenv("PROF"), "bench");
     if (getenv("SHADOW") && atoi(getenv("SHADOW"))) foc.hfi_takeover = false;
+    const int prof_start = getenv("PROF") && !strcmp(getenv("PROF"), "start");
+    if (getenv("HSTART") && atoi(getenv("HSTART"))) { foc.hfi_enable = true; foc.hfi_start = true; }
+    const double sat = getenv("SAT") ? atof(getenv("SAT")) : 0.0;
+if (getenv("IMAX")) { foc.bldc.max_current = (float)atof(getenv("IMAX")); PI_Set_Output_Limit(&foc.speed_ctrl, foc.bldc.max_current); } /* test current cap */
     const double seed = getenv("SEED") ? atof(getenv("SEED")) * M_PI / 180 : 0;
     double hfi_e_sum = 0, hfi_e_max = 0, hfi_q_sum = 0; long hfi_e_n = 0;
     int last_on = 0, last_ctrl = 0;
@@ -108,7 +117,8 @@ int main(int argc, char **argv)
 
         if (t_coast > 0 && t >= t_coast && t - Ts < t_coast) FOC_Coast(&foc);
 
-        if (prof_bench) foc.speed_ref = (t >= 10.0) ? 1500.0f : (t >= 8.5) ? 0.0f : (t >= 2.5) ? 150.0f : 1500.0f;
+        if (prof_start) foc.speed_ref = (t >= 3.0) ? 1500.0f : 150.0f;
+        else if (prof_bench) foc.speed_ref = (t >= 10.0) ? 1500.0f : (t >= 8.5) ? 0.0f : (t >= 2.5) ? 150.0f : 1500.0f;
         else if (prof_low) foc.speed_ref = (t >= 7.0) ? 1500.0f : (t >= 5.0) ? 0.0f : (t >= 2.0) ? 150.0f : 1500.0f;
         else if (t >= 3.0) foc.speed_ref = 2500.0f;
         if (t_hfi >= 0 && t >= t_hfi) foc.hfi_enable = true;
@@ -134,6 +144,9 @@ int main(int argc, char **argv)
         if (foc.motor_mode != last_mode) {
             printf("    t=%7.4f s  -> %-10s  speed %6.1f rad/s el   (observer |E| %.3f V, omega_est %.0f; flux model |forced w|*psi = %.3f V)\n",
                    t, mode_name(foc.motor_mode), wm * p, foc.smo.emf_magnitude, foc.smo.omega_est, fabs(foc.startup_omega) * FLUX_LINKAGE);
+            if (last_mode == MOTOR_STARTUP_HFI)
+                printf("      HFI start: |Zp| +pulse %.4f A, -pulse %.4f A -> pol %d; HFI-rotor %+.2f deg (rotor %.1f deg)\n",
+                       foc.hfi_zp_pos, foc.hfi_zp_neg, foc.hfi_pol, wrap(foc.hfi_theta - th) * 180 / M_PI, wrap(th) * 180 / M_PI);
             if (last_mode == MOTOR_STARTUP_RAMP && t_handover < 0) { t_handover = t; te_before = 1.5 * p * (psi * iq + (Ld - Lq) * id * iq); wm_at_handover = wm; }
             if (foc.motor_mode == MOTOR_RUNNING) t_run = t;
             last_mode = foc.motor_mode;
@@ -158,7 +171,8 @@ int main(int argc, char **argv)
             if (bridge_on) {
                 double xal = (j < SUB * half) ? v_al0 : v_al, xbe = (j < SUB * half) ? v_be0 : v_be;
                 double ud = xal * cc + xbe * ss, uq = -xal * ss + xbe * cc;
-                double did = (ud - Rs * id + we * Lq * iq) / Ld, diq = (uq - Rs * iq - we * Ld * id - we * psi) / Lq;
+                double ldi = Ld * fmin(1.5, fmax(0.5, 1.0 - sat * id)); /* SAT: incremental Ld falls with id along the magnet */
+                double did = (ud - Rs * id + we * Lq * iq) / ldi, diq = (uq - Rs * iq - we * Ld * id - we * psi) / Lq;
                 /* 5th/7th back-EMF harmonics appear as a 6x disturbance in d/q (HD = fraction of fundamental) */
                 /* D = we*psi*(HD*exp(-j6th) + HP*exp(+j6th)): -6 and +6 sequence */
                 did -= we * psi * (HD + HP) * cos(6 * th) / Ld;
