@@ -17,6 +17,7 @@
  *   PROF     "low": speed_ref 1500, 150 from 2 s, 0 from 5 s, 1500 from 7 s (instead of 1500/2500);
  *            "start": 150 from standstill, 1500 from 3 s (the HFI start);
  *            "bench": the freertos.c TEST_PROFILE 2 schedule (150 from 2.5 s, 0 from 8.5 s, 1500 from 10 s)
+ *   FLUX     1: print the library's flux-linkage estimate against the plant value
  *   SHADOW   1: foc.hfi_takeover = false (Align -> I-f start; tracker beside the eSMO, never in control)
  *   IMAX     current cap (A) as TEST_I_MAX in freertos.c
  *   SAT      d-axis saturation: incremental Ld = Ld * (1 - SAT * id), clamped 0.5..1.5 (per A)
@@ -32,6 +33,7 @@
 #include <math.h>
 #include <string.h>
 #include "foc_lib.c" /* white-box: the sims reach internal functions and constants */
+#define POLE_PAIRS 7 /* Plant (bench motor) pole pairs: the library does not need them */
 
 static double HD, HP; /* back-EMF -6 / +6 harmonic fractions (env HD, HP) */
 static double rs_n[2], rs_d[2], rs_dd[2], rs_q[2], rs_qq[2];
@@ -222,6 +224,8 @@ if (getenv("IMAX")) FOC_Set_Current_Limit(&foc, (float)atof(getenv("IMAX"))); /*
     else printf(" | NO HANDOVER (observer never locked)");
     if (n_err) printf("\n  RUNNING: mean |angle error| %.2f deg, mean |id| %.2f A, final speed %.0f rad/s el, mode %s",
                       err_sum / n_err * 180 / M_PI, id_sum / n_err, wm * p, mode_name(foc.motor_mode));
+    if (getenv("FLUX")) printf("\n  flux estimate %.4f mWb (plant %.4f, start %.4f): %+.1f %%", foc.bldc.flux * 1e3, psi * 1e3,
+                               FLUX_LINKAGE * 1e3, (foc.bldc.flux / psi - 1) * 100);
     for (int b = 0; b < 2; b++) if (rs_n[b]) {
         double md = rs_d[b] / rs_n[b], mq = rs_q[b] / rs_n[b];
         printf("\n  hold %d: true id mean %.2f sd %.2f A, iq mean %.2f sd %.2f A", b ? 2500 : 1500,

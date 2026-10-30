@@ -79,6 +79,17 @@
 // Pass as output_limit to disable output clamping
 #define PI_NO_OUTPUT_LIMIT (-1.0f)
 
+// Flux-linkage estimate (Flux_Estimate) while the eSMO is in control
+#define FLUX_EST_OMEGA_MIN (2.0f * OMEGA_FORCE) // Only above this |speed| (rad/s el): enough back-EMF
+#define FLUX_EST_ALPHA (TS / 0.5f)              // Low-pass, 0.5 s time constant
+// The eSMO passes |E| with a gain g(wTs) = 0.8944 + 0.357 wTs + 0.73 (wTs)^2 (w = |omega|, wTs =
+// angle per period): 1/sqrt(1 + 1/ESMO_WC_RATIO^2) at low speed (its back-EMF LPF at cutoff
+// ESMO_WC_RATIO * |omega|), rising with wTs. Fitted to the eSMO alone on an ideal motor (sim,
+// 2026-10-30, within 0.05 % for wTs 0.015..0.2); valid for ESMO_WC_RATIO 2.
+#define FLUX_EST_G0 0.8944f
+#define FLUX_EST_G1 0.357f
+#define FLUX_EST_G2 0.73f
+
 // Internal functions (defined below)
 static void PI_Init(PI_Controller_t *controller, float Kp, float Ki, float sampling_time, float output_limit);
 static void PI_Reset(PI_Controller_t *controller);
@@ -1126,7 +1137,7 @@ void FOC_Init(FOC_t *foc, uint32_t pwm_res)
     foc->bldc.Ld = LS;
     foc->bldc.Lq = LS;
     foc->bldc.Ls = LS;
-    foc->bldc.pole_pairs = POLE_PAIRS;
+    foc->bldc.flux = FLUX_LINKAGE; // Starting value; measured while running (Flux_Estimate)
     foc->bldc.max_current = I_RATED;
 
     // Initialize motor mode
@@ -1466,8 +1477,9 @@ FOC_FAST_CODE static void FOC_MTPA(FOC_t *foc, float Is, float *Id_ref, float *I
     }
 
     float Is_square = Is * Is;
-    float temp = Fast_Sqrt(FLUX_LINKAGE * FLUX_LINKAGE + foc->mtpa_k * Is_square);
-    float id = (FLUX_LINKAGE - temp) * foc->mtpa_inv_4l;
+    const float psi = foc->bldc.flux;
+    float temp = Fast_Sqrt(psi * psi + foc->mtpa_k * Is_square);
+    float id = (psi - temp) * foc->mtpa_inv_4l;
 
     // |id| can marginally exceed |Is| through rounding; clamp so the sqrt stays real
     float iq_square = Is_square - (id * id);
@@ -1618,7 +1630,28 @@ FOC_FAST_CODE static void FOC_Harmonic_Comp(FOC_t *foc)
     foc->v_q += foc->harm_p[0] * s + foc->harm_p[1] * c - foc->harm_n[0] * s + foc->harm_n[1] * c;
 }
 
-// Closed-loop step, inlined into FOC_Update; FOC_Current_Loop_Update wraps it
+// Flux linkage from the eSMO's back-EMF while it is in control and locked: |E| / (g * |omega|), g
+// the eSMO's magnitude gain (FLUX_EST_G*). Only where its back-EMF LPF tracks the speed (between
+// the cutoff floor and ceiling, where g holds), above FLUX_EST_OMEGA_MIN, and for values within
+// 0.5..2x of FLUX_LINKAGE (rejects transients). Used by MTPA and the startup plausibility check.
+FOC_INLINE void Flux_Estimate(FOC_t *foc)
+{
+    const float w = fabsf(foc->smo.omega_est);
+    const float x = foc->smo.esmo_ratio_ts * w; // LPF cutoff * Ts
+    if (!foc->smo.locked || w < FLUX_EST_OMEGA_MIN || x <= foc->smo.esmo_x_lo || x >= ESMO_WC_MAX_TS)
+    {
+        return;
+    }
+    const float wts = w * foc->sampling_time;
+    const float g = FLUX_EST_G0 + wts * (FLUX_EST_G1 + FLUX_EST_G2 * wts);
+    const float psi = foc->smo.emf_magnitude / (g * w);
+    if (psi > 0.5f * FLUX_LINKAGE && psi < 2.0f * FLUX_LINKAGE)
+    {
+        foc->bldc.flux += FLUX_EST_ALPHA * (psi - foc->bldc.flux);
+    }
+}
+
+// Closed-loop step, inlined into FOC_Update
 FOC_INLINE void Current_Loop_Core(FOC_t *foc)
 {
     // Refresh the measured currents in the stationary frame BEFORE running the
@@ -1637,6 +1670,7 @@ FOC_INLINE void Current_Loop_Core(FOC_t *foc)
     // Closed loop: the transforms use the observer's angle
     foc->theta = foc->smo.theta_est;
     foc->omega = foc->smo.omega_est;
+    Flux_Estimate(foc);
 
     FOC_Current_Control(foc);
     FOC_Harmonic_Comp(foc);
@@ -1878,6 +1912,7 @@ FOC_FAST_CODE static void FOC_Current_Loop_HFI(FOC_t *foc)
     {
         foc->theta = Wrap_Once(foc->smo.theta_est + foc->angle_offset);
         foc->omega = foc->smo.omega_est;
+        Flux_Estimate(foc);
     }
 
     FOC_Current_Control(foc);
@@ -2166,7 +2201,7 @@ FOC_FAST_CODE static void FOC_BLDC_Startup_Update(FOC_t *foc)
         bool agree = fabsf(foc->smo.omega_est - foc->startup_omega) <
                      LOCK_SPEED_TOL * fabsf(foc->startup_omega);
         bool plausible = foc->smo.emf_magnitude >=
-                         EMF_PLAUSIBLE_RATIO * fabsf(foc->startup_omega) * FLUX_LINKAGE;
+                         EMF_PLAUSIBLE_RATIO * fabsf(foc->startup_omega) * foc->bldc.flux;
         foc->bemf_counter = (locked && agree && plausible) ? foc->bemf_counter + 1 : 0;
 
         if (fabsf(foc->startup_omega) >= OMEGA_FORCE)

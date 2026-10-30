@@ -5,6 +5,25 @@ Git history starts on 2026-10-26; this file holds the record before that and the
 status of each change (compile / sim / hardware). Newest first below; older sections are
 history (marked superseded where they no longer apply).
 
+## 2026-10-30: no pole-pair parameter; flux linkage measured while running
+
+- The pole-pair count is not used anywhere in the control (all electrical units); `POLE_PAIRS`
+  and `bldc.pole_pairs` removed from foc-lib. An application that wants rpm converts itself.
+  (Detecting it from the motor alone would need mechanical asymmetry; dropped.)
+- `bldc.flux`: starts at `FLUX_LINKAGE`, then `Flux_Estimate` updates it while the eSMO is in
+  control and locked above 2 x OMEGA_FORCE: |E| / (g * |omega|), g = the eSMO's back-EMF magnitude
+  gain, fitted in sim vs omega*Ts (0.894 + 0.357 wTs + 0.73 wTs^2; the analytic LPF gain alone
+  left +3..+6 % speed-dependent bias), 0.5 s low-pass, values outside 0.5..2x FLUX_LINKAGE
+  ignored. MTPA and the startup back-EMF plausibility check use bldc.flux.
+- Sim (`speed_sim` FLUX=1): plant 0.50 / 0.63 / 0.80 mWb read within +-1 % (1500 and 2500
+  rad/s el), -2.9 % at iq ~12 A, +0.3 % with 20 mV dead time, -1.5 % with Rs 30 % off. All 25
+  regression outputs byte-identical with FOC_HFI=1 (the estimate does not change those runs).
+- The demo prints the measured flux after the speed test. Compile: RAM 78.5 %, Flash 9.9 %.
+- Bench 2026-10-30 (prop on, TEST_PROFILE 4, FOC_HFI 1 restored after an unintended local 0):
+  measured flux 0.665 mWb (FLUX_LINKAGE 0.630 from KV 1250 at 7 pole pairs: +5.6 %, within a
+  hobby motor's KV tolerance; the eSMO's raw |E|/omega at 1500 rad/s el, 0.607, x 1/0.925 =
+  0.656). HFI start, holds and the HFI -> eSMO switch unchanged; ISR max 2207 cycles.
+
 ## 2026-10-30: demo application (Src/freertos.c) cleaned up
 
 - Restructured as the reference for using foc-lib: a usage overview at the top, options grouped,

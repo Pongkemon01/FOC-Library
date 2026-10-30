@@ -27,7 +27,7 @@ static void run(const Case *c)
     const int SUB = 40; const double h = Ts / SUB;
     const double IqRef = 3.0, vbus = 16.0;
 
-    BLDC_Specs_t b = { POLE_PAIRS, I_RATED, Rs * c->r_err, Ld * c->l_err, Lq * c->l_err, Ld * c->l_err };
+    BLDC_Specs_t b = { I_RATED, Rs * c->r_err, Ld * c->l_err, Lq * c->l_err, Ld * c->l_err, FLUX_LINKAGE };
     SMO_t smo = {0};
     SMO_Init(&smo, &b, (float)Ts);
 

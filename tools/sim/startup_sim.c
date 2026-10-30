@@ -14,6 +14,7 @@
 #include <math.h>
 #include <string.h>
 #include "foc_lib.c" /* white-box: the sims reach internal functions and constants */
+#define POLE_PAIRS 7 /* Plant (bench motor) pole pairs: the library does not need them */
 
 static double wrap(double x) { x = fmod(x + M_PI, 2 * M_PI); if (x < 0) x += 2 * M_PI; return x - M_PI; }
 static double lsb_noise(void) { return (double)((rand() % 5) - 2); }

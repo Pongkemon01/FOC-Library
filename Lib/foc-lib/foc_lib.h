@@ -80,12 +80,14 @@
 #ifndef LS
 #define LS 0.000007f // Phase inductance (H), Ld ~ Lq; bench calibration Ld 5.5-7 / Lq 7.3-8.1 uH
 #endif
-#ifndef POLE_PAIRS
-#define POLE_PAIRS 7
-#endif
 #ifndef FLUX_LINKAGE
-#define FLUX_LINKAGE 0.000630f // Magnet flux linkage (Wb) = 60 / (sqrt(3) * 2 pi * KV * POLE_PAIRS)
+#define FLUX_LINKAGE 0.000630f // Magnet flux linkage per electrical rad (Wb): the starting value; the
+                               // drive measures it while running (foc->bldc.flux). A rough value is
+                               // enough, e.g. back-EMF peak / electrical speed, or from the KV rating:
+                               // 60 / (sqrt(3) * 2 pi * KV * pole pairs).
 #endif
+// The pole-pair count is not needed: the library works in electrical angles and speeds
+// (rpm = omega_el * 60 / (2 pi * pole pairs), for the application to convert if it wants to).
 
 // Ratings and protection
 #ifndef V_RATED
@@ -151,7 +153,7 @@
 #define I_ALIGN 2.0f // d-axis alignment current (A)
 #endif
 #ifndef I_STARTUP
-#define I_STARTUP 3.0f // q-axis current of the I-f ramp (A): torque = 1.5 * POLE_PAIRS * FLUX_LINKAGE * I
+#define I_STARTUP 3.0f // q-axis current of the I-f ramp (A): torque = 1.5 * pole pairs * FLUX_LINKAGE * I
 #endif
 #ifndef I_REF_SLEW
 #define I_REF_SLEW 200.0f // Startup current-reference slew (A/s)
@@ -281,12 +283,12 @@ typedef struct
 // BLDC specifications structure
 typedef struct
 {
-    uint32_t pole_pairs;
     float max_current;
-    float Rs; // Stator resistance
-    float Ld; // Stator inductance (d-axis)
-    float Lq; // Stator inductance (q-axis)
-    float Ls; // Stator inductance (average of Ld and Lq)
+    float Rs;   // Stator resistance
+    float Ld;   // Stator inductance (d-axis)
+    float Lq;   // Stator inductance (q-axis)
+    float Ls;   // Stator inductance (average of Ld and Lq)
+    float flux; // Magnet flux linkage (Wb): FLUX_LINKAGE, then measured while running on the eSMO
 } BLDC_Specs_t;
 
 // Enhanced sliding-mode observer (eSMO + PLL) structure

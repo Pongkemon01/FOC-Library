@@ -67,7 +67,7 @@ startup_sim <Tc_Nm> <kfan_Nm_per_(rad/s)^2> <Lq/Ld> <coast_time_s or -1> <t_end_
 - `Tc` Coulomb load torque, `kfan` fan/prop torque coefficient (mechanical rad/s).
 - `coast_time_s` > 0 calls `FOC_Coast()` at that time and reports the winding current after it.
 - `plant_flux_Wb` / `plant_pole_pairs` make the simulated motor differ from the library
-  constants — use this to test a wrong `FLUX_LINKAGE` / `POLE_PAIRS` in the header.
+  constants — use this to test a wrong `FLUX_LINKAGE` (the library has no pole-pair parameter; the sims define the plant's, 7). `speed_sim` env `FLUX=1` prints the library's flux estimate against the plant value.
 
 Examples:
 
@@ -80,7 +80,7 @@ build-sim/startup_sim 0.002 1e-6 1 -1 2.5 1 0.63e-3 7    # real 3542 motor vs CU
 ```
 
 To simulate the library with corrected constants, build against an edited copy of
-`foc_lib.h` (e.g. `POLE_PAIRS 7`, `FLUX_LINKAGE 0.00063f`) and pass the same plant values.
+`foc_lib.h` (e.g. `FLUX_LINKAGE 0.00063f`) and pass the same plant values.
 2026-10 result: corrected constants hand over and run at `OMEGA_FORCE` 300 and 500
 (`STARTUP_ACCEL` 800); 1000 / 2000 falls out of step under a prop-like load at 3 A.
 

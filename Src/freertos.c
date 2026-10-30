@@ -484,6 +484,10 @@ static void Speed_Test(void)
     printf("IRQ cycles (handler entry to callback end): max %lu\r\n", (unsigned long)irq_cyc_max);
     printf("Stopping FOC control... (vbus_fault = %d, vbus_uv_fault = %d)\r\n", (int)foc.vbus_fault,
            (int)foc.vbus_uv_fault);
+    // Measured while running on the eSMO (above 2 x OMEGA_FORCE). Recommendation: once it has
+    // settled, set FLUX_LINKAGE to it (foc_lib_conf.h), so the first start also uses the real value.
+    printf("Flux linkage: measured %d nWb (FLUX_LINKAGE %d nWb)\r\n", (int)(foc.bldc.flux * 1e9f),
+           (int)(FLUX_LINKAGE * 1e9f));
     FOC_Stop(&foc);
     FOC_Set_Current_Limit(&foc, I_RATED);
 
