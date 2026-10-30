@@ -322,12 +322,6 @@ void StartDefaultTask(void *argument)
     printf("ADC offset 2 = %d\r\n", foc.adc_offset_b);
     printf("ADC offset 3 = %d\r\n", foc.adc_offset_c);
 
-    // Debug
-    // foc.v_d = 0.5f;
-    // foc.v_q = 0.0f;
-    // foc.v_bus = V_RATED;
-    // FOC_Open_Loop_Voltage_Control(&foc, 0.0f);
-
     printf("PWM calculations:\r\n");
     printf("  - Parameters : PWM-Resolution = %d , Vbus = %f\r\n", foc.pwm_resolution, foc.v_bus);
     printf("=======================================\r\n");
@@ -340,47 +334,6 @@ void StartDefaultTask(void *argument)
         for (;;)
             osDelay(1000);
     }
-    // printf("  - Vd = %f , Vq = %f ===> Valpha = %f , Vbeta = %f\r\n", foc.v_d, foc.v_q, foc.v_alpha, foc.v_beta);
-    // printf("  - PWM_A = %ld, PWM_B = %ld, PWM_C = %ld\r\n\r\n", foc.pwm_a, foc.pwm_b, foc.pwm_c);
-
-    // Measuring Rs
-    // printf("Measureing Rs\r\n");
-    // for (int i = 0; i < INJECTION_ROUNDS; i++)
-    // {
-    //     foc.vd_inj_buff[i] = 0.0f;
-    //     foc.id_inj_buff[i] = 0.0f;
-    // }
-    // foc.foc_mode = FOC_CALIBRATION;
-    // foc.motor_mode = MOTOR_ESTIMATION_RS;
-
-    // Debugging
-    // printf("Starting Openloop injection...\r\n");
-    // foc.v_d = 0.2f;
-    // foc.v_q = 0.0f;
-    // FOC_Open_Loop_Voltage_Control(&foc, 0.0f);
-
-    // osDelay(1000);
-    // printf("Sensor Reading:\r\n");
-    // printf("  - ADC_A = %d, ADC_B = %d, ADC_C = %d, ADC_Vbus = %d\r\n", foc.adc_v_a, foc.adc_v_b, foc.adc_v_c, foc.adc_v_bus);
-    // printf("  - I_A = %f, I_B = %f\r\n", foc.i_a, foc.i_b);
-    // printf("  - V Bus = %f V.\r\n", foc.v_bus);
-    // printf("  - Vd = %f , Vq = %f ===> Valpha = %f , Vbeta = %f\r\n", foc.v_d, foc.v_q, foc.v_alpha, foc.v_beta);
-    // printf("  - PWM_A = %ld, PWM_B = %ld, PWM_C = %ld\r\n\r\n", foc.pwm_a, foc.pwm_b, foc.pwm_c);
-    // printf("========================================\r\n");
-
-    // printf("Stopping Openloop injection...\r\n");
-    // foc.v_d = 0.0f;
-    // foc.v_q = 0.0f;
-    // FOC_Open_Loop_Voltage_Control(&foc, 0.0f);
-
-    // osDelay(1000);
-    // printf("Sensor Reading:\r\n");
-    // printf("  - ADC_A = %d, ADC_B = %d, ADC_C = %d, ADC_Vbus = %d\r\n", foc.adc_v_a, foc.adc_v_b, foc.adc_v_c, foc.adc_v_bus);
-    // printf("  - I_A = %f, I_B = %f\r\n", foc.i_a, foc.i_b);
-    // printf("  - V Bus = %f V.\r\n", foc.v_bus);
-    // printf("  - Vd = %f , Vq = %f ===> Valpha = %f , Vbeta = %f\r\n", foc.v_d, foc.v_q, foc.v_alpha, foc.v_beta);
-    // printf("  - PWM_A = %ld, PWM_B = %ld, PWM_C = %ld\r\n\r\n", foc.pwm_a, foc.pwm_b, foc.pwm_c);
-
     foc.foc_mode = FOC_CALIBRATION;
     foc.motor_mode = MOTOR_ESTIMATION_RS;
     foc.inj_fault = false;
@@ -618,10 +571,6 @@ void StartDefaultTask(void *argument)
     for (;;)
     {
         osDelay(5000);
-        // printf("Sensor Reading:\r\n");
-        // printf("  - ADC_A = %d, ADC_B = %d, ADC_C = %d, ADC_Vbus = %d\r\n", foc.adc_v_a, foc.adc_v_b, foc.adc_v_c, foc.adc_v_bus);
-        // printf("  - I_A = %f, I_B = %f\r\n", foc.i_a, foc.i_b);
-        // printf("  - PWM_A = %ld, PWM_B = %ld, PWM_C = %ld\r\n\r\n", foc.pwm_a, foc.pwm_b, foc.pwm_c);
     }
     /* USER CODE END StartDefaultTask */
 }
@@ -635,12 +584,10 @@ void StartDefaultTask(void *argument)
 // (FOC_FAST_CODE: runs from CCM SRAM with FOC_Update with this port's Inc/foc_lib_conf.h)
 FOC_FAST_CODE void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc)
 {
-    // Toggle LED
     if (hadc->Instance == ADC1) // Current sensor phase U
     {
         const uint32_t cyc0 = DWT->CYCCNT;
         GPIOC->BSRR = GPIO_PIN_8; // PC8 high for the callback's duration (scope timing)
-        // HAL_GPIO_TogglePin(LED_RED_GPIO_Port, LED_RED_Pin);
         //  Measure ADC values for phase currents and bus voltage: injected ranks 1-4 are
         //  JDR1-4 (what HAL_ADCEx_InjectedGetValue returns, without the call and switch)
         foc.adc_v_a = ADC1->JDR1;

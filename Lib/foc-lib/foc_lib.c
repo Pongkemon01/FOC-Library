@@ -972,7 +972,6 @@ void FOC_Init(FOC_t *foc, uint32_t pwm_res, uint32_t adc_offset)
     foc->startup_theta = 0.0f;
     foc->startup_omega = 0.0f;
     foc->angle_offset = 0.0f;
-    foc->backup_theta = 0.0f;
     foc->bemf_counter = 0;
     foc->adc_offset_a = adc_offset;
     foc->adc_offset_b = adc_offset;
@@ -1469,9 +1468,7 @@ FOC_FAST_CODE void FOC_HFI_Update(FOC_t *foc)
         Fast_Sin_Cos(foc->hfi_phi_h[HFI_DELAY - 1], &s, &c);
         float par = d_al * c + d_be * s;
         float perp = -d_al * s + d_be * c;
-        float d = foc->hfi_delta_h[HFI_DELAY - 1];
-        Fast_Sin_Cos(2.0f * d, &s, &c);
-        float pc = perp * c, ps = perp * s;
+        float pc = perp * foc->hfi_c2_h[HFI_DELAY - 1], ps = perp * foc->hfi_s2_h[HFI_DELAY - 1];
 
         // Multiply by e^(-j pi idx / 2): one of 1, -j, -1, j
         switch (foc->hfi_idx)
@@ -1536,10 +1533,12 @@ FOC_FAST_CODE void FOC_HFI_Update(FOC_t *foc)
     for (int j = HFI_DELAY - 1; j > 0; j--)
     {
         foc->hfi_phi_h[j] = foc->hfi_phi_h[j - 1];
-        foc->hfi_delta_h[j] = foc->hfi_delta_h[j - 1];
+        foc->hfi_c2_h[j] = foc->hfi_c2_h[j - 1];
+        foc->hfi_s2_h[j] = foc->hfi_s2_h[j - 1];
     }
     foc->hfi_phi_h[0] = foc->theta + foc->ipark_adv * foc->omega + foc->hfi_delta;
-    foc->hfi_delta_h[0] = foc->hfi_delta;
+    foc->hfi_c2_h[0] = c * c - s * s; // Double angle: no second table look-up
+    foc->hfi_s2_h[0] = 2.0f * s * c;
 
     foc->hfi_ia_h = i_al;
     foc->hfi_ib_h = i_be;
@@ -1550,7 +1549,7 @@ FOC_FAST_CODE void FOC_HFI_Update(FOC_t *foc)
         foc->hfi_delta -= PI;
     }
     foc->hfi_idx = (foc->hfi_idx + 1u) & 3u;
-    if (foc->hfi_cnt < 0xFFFFFFFFu)
+    if (foc->hfi_cnt <= HFI_DELAY) // Only "history filled" matters
     {
         foc->hfi_cnt++;
     }
@@ -1809,15 +1808,11 @@ void FOC_BLDC_Parameter_Calculation_Resistance(FOC_t *foc)
 
     for (int i = 0; i < INJECTION_ROUNDS; i++)
     {
-        // printf("ADC_Va_buff = %d,ADC_Vb_buff = %d, Ia = %f, Ib = %f, Vd = %f, Id = %f\r\n", foc->adc_v_a_buff[i], foc->adc_v_b_buff[i], foc->i_a_buff[i], foc->i_b_buff[i],
-        //        foc->vd_inj_buff[i], foc->id_inj_buff[i]);
         mean_vd += foc->vd_inj_buff[i];
         mean_id += foc->id_inj_buff[i];
     }
     mean_vd /= INJECTION_ROUNDS;
     mean_id /= INJECTION_ROUNDS;
-
-    // printf("\r\nMean Vd = %f, Id = %f\r\n", mean_vd, mean_id);
 
     // Reject a failed/aborted injection instead of writing inf/NaN into bldc,
     // which would propagate into the SMO coefficients via FOC_Recalc_Params.
@@ -1850,64 +1845,44 @@ void FOC_BLDC_Parameter_Calculation_Resistance(FOC_t *foc)
 }
 
 // ---------------------------------------------------------------------------
+// Single-frequency DFT of an injection buffer at INJECTION_FREQ, mean removed:
+// amplitude-scaled cosine (c) and sine (s) parts
+static void Injection_Phasor(const float *buf, float sampling_time, float *c, float *s)
+{
+    float mean = 0.0f;
+    for (int i = 0; i < INJECTION_ROUNDS; i++)
+    {
+        mean += buf[i];
+    }
+    mean /= INJECTION_ROUNDS;
+
+    float sc = 0.0f, ss = 0.0f;
+    for (int i = 0; i < INJECTION_ROUNDS; i++)
+    {
+        float angle = INJECTION_OMEGA * i * sampling_time;
+        float x = buf[i] - mean;
+        sc += x * Fast_Cos(angle);
+        ss += x * Fast_Sin(angle);
+    }
+    *c = sc * (2.0f / INJECTION_ROUNDS);
+    *s = ss * (2.0f / INJECTION_ROUNDS);
+}
+
+// ---------------------------------------------------------------------------
 // BLDC inductance calculation after measurement
 void FOC_BLDC_Parameter_Calculation_Inductance(FOC_t *foc)
 {
-    float vd, vq, id, iq;
-    float Vc_d = 0.0f, Vs_d = 0.0f, Ic_d = 0.0f, Is_d = 0.0f;
-    float Vc_q = 0.0f, Vs_q = 0.0f, Ic_q = 0.0f, Is_q = 0.0f;
-    float mean_vd = 0.0f, mean_vq = 0.0f, mean_id = 0.0f, mean_iq = 0.0f;
+    float Vc_d, Vs_d, Ic_d, Is_d, Vc_q, Vs_q, Ic_q, Is_q;
 
     if (foc == NULL)
     {
         return;
     }
 
-    // Calculate DC offset
-    for (int i = 0; i < INJECTION_ROUNDS; i++)
-    {
-        mean_vd += foc->vd_inj_buff[i];
-        mean_vq += foc->vq_inj_buff[i];
-        mean_id += foc->id_inj_buff[i];
-        mean_iq += foc->iq_inj_buff[i];
-    }
-    mean_vd /= INJECTION_ROUNDS;
-    mean_vq /= INJECTION_ROUNDS;
-    mean_id /= INJECTION_ROUNDS;
-    mean_iq /= INJECTION_ROUNDS;
-
-    // Single-frequency DFT
-    float angle;
-    for (int i = 0; i < INJECTION_ROUNDS; i++)
-    {
-        angle = INJECTION_OMEGA * i * foc->sampling_time;
-
-        // Remove DC offset
-        vd = foc->vd_inj_buff[i] - mean_vd;
-        vq = foc->vq_inj_buff[i] - mean_vq;
-        id = foc->id_inj_buff[i] - mean_id;
-        iq = foc->iq_inj_buff[i] - mean_iq;
-
-        Vc_d += vd * Fast_Cos(angle);
-        Vs_d += vd * Fast_Sin(angle);
-        Ic_d += id * Fast_Cos(angle);
-        Is_d += id * Fast_Sin(angle);
-
-        Vc_q += vq * Fast_Cos(angle);
-        Vs_q += vq * Fast_Sin(angle);
-        Ic_q += iq * Fast_Cos(angle);
-        Is_q += iq * Fast_Sin(angle);
-    }
-
-    const float norm = 2.0f / INJECTION_ROUNDS;
-    Vc_d *= norm;
-    Vs_d *= norm;
-    Ic_d *= norm;
-    Is_d *= norm;
-    Vc_q *= norm;
-    Vs_q *= norm;
-    Ic_q *= norm;
-    Is_q *= norm;
+    Injection_Phasor(foc->vd_inj_buff, foc->sampling_time, &Vc_d, &Vs_d);
+    Injection_Phasor(foc->id_inj_buff, foc->sampling_time, &Ic_d, &Is_d);
+    Injection_Phasor(foc->vq_inj_buff, foc->sampling_time, &Vc_q, &Vs_q);
+    Injection_Phasor(foc->iq_inj_buff, foc->sampling_time, &Ic_q, &Is_q);
 
     // V & I amplitude
     float Vd_mag = Fast_Sqrt(Vc_d * Vc_d + Vs_d * Vs_d);
@@ -1961,30 +1936,10 @@ void FOC_BLDC_Parameter_Calculation_Inductance(FOC_t *foc)
 // This is the signal a pulsating HF-injection observer would track. Returns false if no current.
 bool FOC_BLDC_Saliency_Point(const FOC_t *foc, float *L_axis, float *cross_re, float *cross_im)
 {
-    float mv = 0.0f, mi = 0.0f, mx = 0.0f;
-    for (int i = 0; i < INJECTION_ROUNDS; i++)
-    {
-        mv += foc->vd_inj_buff[i];
-        mi += foc->id_inj_buff[i];
-        mx += foc->iq_inj_buff[i];
-    }
-    mv /= INJECTION_ROUNDS;
-    mi /= INJECTION_ROUNDS;
-    mx /= INJECTION_ROUNDS;
-
-    // Single-frequency DFT (as in FOC_BLDC_Parameter_Calculation_Inductance)
-    float Vc = 0.0f, Vs = 0.0f, Ic = 0.0f, Is = 0.0f, Xc = 0.0f, Xs = 0.0f;
-    for (int i = 0; i < INJECTION_ROUNDS; i++)
-    {
-        float angle = INJECTION_OMEGA * i * foc->sampling_time;
-        float c = Fast_Cos(angle), s = Fast_Sin(angle);
-        Vc += (foc->vd_inj_buff[i] - mv) * c;
-        Vs += (foc->vd_inj_buff[i] - mv) * s;
-        Ic += (foc->id_inj_buff[i] - mi) * c;
-        Is += (foc->id_inj_buff[i] - mi) * s;
-        Xc += (foc->iq_inj_buff[i] - mx) * c;
-        Xs += (foc->iq_inj_buff[i] - mx) * s;
-    }
+    float Vc, Vs, Ic, Is, Xc, Xs;
+    Injection_Phasor(foc->vd_inj_buff, foc->sampling_time, &Vc, &Vs);
+    Injection_Phasor(foc->id_inj_buff, foc->sampling_time, &Ic, &Is);
+    Injection_Phasor(foc->iq_inj_buff, foc->sampling_time, &Xc, &Xs);
 
     float i2 = Ic * Ic + Is * Is;
     if (i2 < 1e-12f)
@@ -2091,11 +2046,6 @@ FOC_FAST_CODE void FOC_BLDC_Parameter_Measurement_Update(FOC_t *foc)
         else if (foc->inj_n >= rounds_total - INJECTION_ROUNDS)
         {
             uint32_t index = foc->inj_n - (rounds_total - INJECTION_ROUNDS);
-            foc->pwm_a_buff[index] = foc->pwm_a;
-            foc->pwm_b_buff[index] = foc->pwm_b;
-            foc->pwm_c_buff[index] = foc->pwm_c;
-            foc->adc_v_a_buff[index] = foc->adc_v_a;
-            foc->adc_v_b_buff[index] = foc->adc_v_b;
             foc->i_a_buff[index] = foc->i_a;
             foc->i_b_buff[index] = foc->i_b;
 

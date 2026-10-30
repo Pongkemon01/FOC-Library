@@ -5,6 +5,20 @@ Git history starts on 2026-10-26; this file holds the record before that and the
 status of each change (compile / sim / hardware). Newest first below; older sections are
 history (marked superseded where they no longer apply).
 
+## 2026-10-30: cleanup
+
+- Removed write-only `FOC_t` fields: `pwm_a/b/c_buff`, `adc_v_a/b_buff` (4 KB RAM: 84.8 % -> 78.5 %)
+  and `backup_theta`. `i_a_buff`/`i_b_buff` stay (current-sign diagnostic in `Src/freertos.c`).
+- Removed commented-out debug code: freertos.c open-loop blocks calling the long-gone
+  `FOC_Open_Loop_Voltage_Control`, the idle-loop prints and LED toggle; foc_lib.c Rs prints.
+- `Injection_Phasor()`: one single-frequency DFT helper shared by
+  `FOC_BLDC_Parameter_Calculation_Inductance` and `FOC_BLDC_Saliency_Point` (was duplicated).
+- `FOC_HFI_Update`: cos/sin(2 delta) from the double-angle identity at injection time instead of
+  a second table look-up per period; `hfi_cnt` stops at HFI_DELAY + 1.
+- Verification: compile (RAM 78.5 %, Flash 10.0 %); sims byte-identical to the previous commit
+  (calib_sim, saliency_sim, speed_sim incl. HFI/HALF/VSAG, startup_sim, esmo_sim). ISR cycle
+  saving not measured on the bench.
+
 ## 2026-10-27: passive HFI estimator alongside the eSMO (step 1 of the HFI low-speed plan)
 
 - Goal: check that HF-injection position estimation works on this motor under load current,

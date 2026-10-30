@@ -442,21 +442,20 @@ typedef struct
     bool inj_fault; // Set when injection aborted on over-current
     float inj_angle; // Injection frame angle (rad el, 0..2pi): 0 for Rs/Ld/Lq, swept by the saliency test
     float rs_low_vd_sum, rs_low_id_sum; // Two-point Rs: sums recorded at INJECTION_VOLTAGE_RS_LOW
-    uint16_t adc_v_a_buff[INJECTION_ROUNDS], adc_v_b_buff[INJECTION_ROUNDS];
-    float i_a_buff[INJECTION_ROUNDS], i_b_buff[INJECTION_ROUNDS];
+    float i_a_buff[INJECTION_ROUNDS], i_b_buff[INJECTION_ROUNDS]; // Phase currents (current-sign diagnostic)
     float vd_inj_buff[INJECTION_ROUNDS]; // Buffer for injected voltages
     float vq_inj_buff[INJECTION_ROUNDS];
     float id_inj_buff[INJECTION_ROUNDS]; // Buffer for measured currents
     float iq_inj_buff[INJECTION_ROUNDS];
-    uint32_t pwm_a_buff[INJECTION_ROUNDS], pwm_b_buff[INJECTION_ROUNDS], pwm_c_buff[INJECTION_ROUNDS];
 
     // Passive HFI estimator (see HFI_VOLTAGE). hfi_enable is written by the application;
     // the rest is ISR state and the latched results of the last complete window.
     bool hfi_enable;
-    uint32_t hfi_cnt;               // Periods since (re)start, saturating; history valid from HFI_DELAY
+    uint32_t hfi_cnt;               // Periods since (re)start, stops at HFI_DELAY + 1 (history filled)
     uint32_t hfi_idx;               // Square-wave phase 0..3 (sign + for 0, 1)
     float hfi_delta;                // Injection axis offset from the control d-axis (rad, 0..pi)
-    float hfi_delta_h[HFI_DELAY];   // delta of the last HFI_DELAY periods ([0] = newest)
+    float hfi_c2_h[HFI_DELAY];      // cos(2 delta) of the last HFI_DELAY periods ([0] = newest)
+    float hfi_s2_h[HFI_DELAY];      // sin(2 delta) of the last HFI_DELAY periods
     float hfi_phi_h[HFI_DELAY];     // Applied injection axis angle (alpha-beta) of the last HFI_DELAY periods
     float hfi_ia_h, hfi_ib_h;       // Unfiltered alpha/beta currents of the previous sample
     uint32_t hfi_n;                 // Samples in the current window
@@ -480,7 +479,6 @@ typedef struct
     float startup_theta;   // Open-loop (forced) angle for startup
     float startup_omega;   // Open-loop (forced) speed for startup (electrical rad/s)
     float angle_offset;    // Transition: forced minus observer angle, decays to 0
-    float backup_theta;    // Unused (kept for source compatibility)
     uint32_t bemf_counter; // Counter for back-EMF detection during startup
 } FOC_t;
 
