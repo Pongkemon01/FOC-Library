@@ -28,6 +28,9 @@ static const char *mode_name(int m)
     case MOTOR_STARTUP_TRANSITION: return "TRANSITION";
 #endif
     case MOTOR_RUNNING: return "RUNNING";
+#if FOC_HFI
+    case MOTOR_STARTUP_HFI: return "HFI_START";
+#endif
     default: return "?";
     }
 }
