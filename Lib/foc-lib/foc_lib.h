@@ -432,6 +432,7 @@ typedef struct
     uint32_t hfi_agree_cnt;         // HFI -> eSMO: consecutive periods of agreement
     uint32_t hfi_fault_cnt;         // Consecutive periods with a bad HF response or a large error
     uint32_t hfi_rev_cnt;           // Consecutive periods of rotation against rotor_dir in HFI control
+    uint32_t hfi_vbal_cnt;          // Consecutive periods of unexplained voltage in HFI control
     float hfi_theta;                // Tracker angle (rad el, 0..2pi): rotor d-axis estimate
     float hfi_omega;                // Tracker speed (PLL integrator, electrical rad/s)
     float hfi_phi_h[HFI_DELAY];     // Applied injection axis angle (alpha-beta), [0] = newest

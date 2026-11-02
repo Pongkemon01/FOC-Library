@@ -161,6 +161,16 @@ static void FOC_BLDC_Startup_Update(FOC_t *foc);
 // HFI_REVERSE_PERIODS latches hfi_fault and coasts (the drive is motoring only).
 #define HFI_REVERSE_OMEGA 50.0f                    // Electrical rad/s
 #define HFI_REVERSE_PERIODS ((uint32_t)(0.05f * PWM_FREQ)) // 50 ms
+// A tracker that lost the rotor while it spins up reads ~0 speed while the current loop drives the
+// voltage to the limit against the real back-EMF (T200 bench: runaway near no-load speed). In HFI
+// control, |v_dq| above Rs|i| + |omega|(Ls|i| + flux) by more than HFI_VBAL_RATIO of the voltage
+// limit for HFI_VBAL_PERIODS latches hfi_fault and coasts.
+// The opposite failure (T200 bench): the tracker's PLL runs away to ~2000 rad/s el while the
+// rotor stands. HFI only works below HFI_OMEGA_UP and hands back once the eSMO agrees, so
+// |hfi_omega| above HFI_OVERSPEED * HFI_OMEGA_UP for HFI_VBAL_PERIODS also latches hfi_fault.
+#define HFI_OVERSPEED 2.0f
+#define HFI_VBAL_RATIO 0.3f
+#define HFI_VBAL_PERIODS ((uint32_t)(0.02f * PWM_FREQ)) // 20 ms
 // Start from standstill on HFI (MOTOR_STARTUP_HFI; Align -> I-f in the shadow test, hfi_takeover false):
 //  1. Lock: zero current, tracker from theta = 0 for HFI_LOCK_TIME. It settles on the rotor's
 //     d-axis or on its opposite end (sin 2e has both as stable points).
@@ -1886,6 +1896,7 @@ FOC_FAST_CODE static void FOC_Current_Loop_HFI(FOC_t *foc)
                 foc->hfi_control = true;
                 foc->hfi_agree_cnt = 0;
                 foc->hfi_rev_cnt = 0;
+                foc->hfi_vbal_cnt = 0;
             }
             else
             {
@@ -1901,6 +1912,21 @@ FOC_FAST_CODE static void FOC_Current_Loop_HFI(FOC_t *foc)
         const float dir = (foc->rotor_dir == NORMAL_DIRECTION) ? 1.0f : -1.0f;
         foc->hfi_rev_cnt = (dir * foc->hfi_omega < -HFI_REVERSE_OMEGA) ? foc->hfi_rev_cnt + 1u : 0u;
         if (foc->hfi_rev_cnt >= HFI_REVERSE_PERIODS)
+        {
+            foc->hfi_fault = true;
+            FOC_Coast(foc);
+            return;
+        }
+
+        // Voltage balance (see HFI_VBAL_RATIO); last period's voltage and current
+        const float i_mag = Fast_Sqrt(foc->i_d * foc->i_d + foc->i_q * foc->i_q);
+        const float v_expl = foc->bldc.Rs * i_mag +
+                             fabsf(foc->hfi_omega) * (foc->bldc.Ls * i_mag + foc->bldc.flux) +
+                             HFI_VBAL_RATIO * ONE_OVER_SQRT3 * foc->v_bus;
+        const bool v_high = foc->v_d * foc->v_d + foc->v_q * foc->v_q > v_expl * v_expl;
+        const bool w_high = fabsf(foc->hfi_omega) > HFI_OVERSPEED * HFI_OMEGA_UP;
+        foc->hfi_vbal_cnt = (v_high || w_high) ? foc->hfi_vbal_cnt + 1u : 0u;
+        if (foc->hfi_vbal_cnt >= HFI_VBAL_PERIODS)
         {
             foc->hfi_fault = true;
             FOC_Coast(foc);

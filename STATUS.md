@@ -26,8 +26,19 @@ history (marked superseded where they no longer apply).
   not restart, so the 150 / 1500 steps after it are not run. No runaway. ISR max 1746 cycles
   (tracker off).
 - Not covered: low-speed / standstill holding on a non-salient motor (needs HFI or another
-  low-speed estimator); runaway detection (vq saturated with a near-zero speed estimate) while
-  HFI is in control on a salient motor.
+  low-speed estimator).
+- HFI-control sanity checks (added the same day; both latch `hfi_fault` after 20 ms and coast):
+  voltage balance (`HFI_VBAL_RATIO`: |v_dq| above Rs|i| + |w|(Ls|i| + flux) by 0.3 x the voltage
+  limit: the morning's runaway, vq at the limit with the tracker at ~0) and over-speed
+  (`HFI_OVERSPEED`: |hfi_omega| above 2 x HFI_OMEGA_UP, i.e. 780 rad/s el). Sim: salient cases
+  byte-identical (PROF=start/low/bench, SEED=180); the sim never reproduces either failure.
+  Bench, T200 with the probe gate temporarily bypassed: run 1 (voltage check only) showed a
+  different failure, the tracker's PLL running off to ~2000 rad/s el with the rotor stopped
+  (eSMO ~0, no voltage saturation), not caught; run 2 with the over-speed check: tripped at
+  ~800 rad/s el (t 3.41 s), hfi_fault 1, IDLE. Hardware-verified: over-speed branch only. The
+  voltage-balance branch is compile/sim-verified (no false trips) but not yet seen to trip.
+- Bench oddity: the saliency sweep was sane in the bypass runs (L0 57.6 uH, A2 8.9 uH, axis
+  163 deg) but nonsense in the first T200 run; the Lq spread suggests the rotor moves.
 
 ## 2026-10-30: self-commissioning (unknown motor)
 
