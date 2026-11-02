@@ -36,7 +36,15 @@ history (marked superseded where they no longer apply).
   different failure, the tracker's PLL running off to ~2000 rad/s el with the rotor stopped
   (eSMO ~0, no voltage saturation), not caught; run 2 with the over-speed check: tripped at
   ~800 rad/s el (t 3.41 s), hfi_fault 1, IDLE. Hardware-verified: over-speed branch only. The
-  voltage-balance branch is compile/sim-verified (no false trips) but not yet seen to trip.
+  voltage-balance branch is compile/sim-verified (no false trips) but not yet seen to trip on the bench.
+- Voltage-balance trip, sim fault injection (`speed_sim` env `HFIFAKE=<deg>`, from `HFIFAKE_T`,
+  default 3 s: the tracker in control reads omega 0 and an angle `deg` behind the rotor, the T200
+  runaway). `PROF=low HALF=0.5 ... 0.002 1e-7 1.33 -1 9 1 <psi> 7`, takeover at 2.74 s, ref 150:
+  0/45/70 deg trip as "voltage balance" at 3.19/3.24/3.44 s, rotor already 3830/3570/3320 rad/s el
+  (psi 0.63 mWb); psi 0.98 mWb (T200), 45 deg: 3.14 s at 2630 rad/s el. 90 deg gives no torque,
+  no runaway, no trip. Without HFIFAKE unchanged (no fault). Sim-verified: the check works but is
+  late, since the 0.3 x v_bus/sqrt3 margin (2.1 V at 12 V) hides back-EMF up to ~2.1 V / psi.
+  Tightening `HFI_VBAL_RATIO` would trip earlier; not done (false-trip risk unmeasured).
 - Bench oddity: the saliency sweep was sane in the bypass runs (L0 57.6 uH, A2 8.9 uH, axis
   163 deg) but nonsense in the first T200 run; the Lq spread suggests the rotor moves.
 

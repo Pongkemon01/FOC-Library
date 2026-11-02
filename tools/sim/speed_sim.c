@@ -105,6 +105,8 @@ if (getenv("IMAX")) FOC_Set_Current_Limit(&foc, (float)atof(getenv("IMAX"))); /*
     const double seed = getenv("SEED") ? atof(getenv("SEED")) * M_PI / 180 : 0;
     double hfi_e_sum = 0, hfi_e_max = 0, hfi_q_sum = 0; long hfi_e_n = 0;
     int last_on = 0, last_ctrl = 0;
+    const double fake = getenv("HFIFAKE") ? atof(getenv("HFIFAKE")) * M_PI / 180 : 0;
+    const double fake_t = getenv("HFIFAKE") ? (getenv("HFIFAKE_T") ? atof(getenv("HFIFAKE_T")) : 3.0) : -1;
 
     for (long k = 0; k * Ts < t_end; k++) {
         double t = k * Ts;
@@ -125,11 +127,14 @@ if (getenv("IMAX")) FOC_Set_Current_Limit(&foc, (float)atof(getenv("IMAX"))); /*
         else if (prof_low) foc.speed_ref = (t >= 7.0) ? 1500.0f : (t >= 5.0) ? 0.0f : (t >= 2.0) ? 150.0f : 1500.0f;
         else if (t >= 3.0) foc.speed_ref = 2500.0f;
         FOC_Update(&foc);
+        /* HFIFAKE=deg: from HFIFAKE_T s, a broken tracker in control reads omega 0 and an angle
+           that deg lags the rotor (torque still forward), the bench runaway seen on the T200 */
+        if (fake_t >= 0 && t >= fake_t && foc.hfi_control) { foc.hfi_theta = (float)fmod(th - fake + 4 * M_PI, 2 * M_PI); foc.hfi_omega = 0.0f; }
         if (foc.hfi_on && !last_on && seed != 0) foc.hfi_theta = (float)fmod(foc.hfi_theta + seed + 2 * M_PI, 2 * M_PI);
         if (foc.hfi_on != last_on || foc.hfi_control != last_ctrl)
             printf("    t=%7.4f s  HFI tracker %s, control %s  speed %6.1f rad/s el (est %.0f, eSMO %.0f, HFI %.0f), rotor-control %+.2f deg, HFI-rotor %+.2f deg%s\n",
                    t, foc.hfi_on ? "ON " : "off", foc.hfi_control ? "HFI " : "eSMO", wm * p, foc.omega, foc.smo.omega_est, foc.hfi_omega,
-                   wrap(th - foc.theta) * 180 / M_PI, wrap(foc.hfi_theta - th) * 180 / M_PI, foc.hfi_fault ? " FAULT" : "");
+                   wrap(th - foc.theta) * 180 / M_PI, wrap(foc.hfi_theta - th) * 180 / M_PI, foc.hfi_fault ? (foc.hfi_vbal_cnt >= HFI_VBAL_PERIODS ? " FAULT (voltage balance)" : " FAULT") : "");
         last_on = foc.hfi_on; last_ctrl = foc.hfi_control;
         if (FOC_HFI && foc.motor_mode == MOTOR_RUNNING) {
             double e = wrap(th - foc.theta);
