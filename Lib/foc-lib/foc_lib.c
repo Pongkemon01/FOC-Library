@@ -70,6 +70,7 @@
 #define MIN_SALIENCY_H 1e-7f                      // Below this Lq-Ld the motor is treated as non-salient (H)
 #define INJECTION_FREQ 1000.0f                    // Injection frequency for parameter measurement (Hz)
 #define INJECTION_OMEGA (TWO_PI * INJECTION_FREQ) // Injection angular frequency (rad/s)
+#define CAL_LQ_HOLD 0.5f // Lq run: DC d-axis current holding the rotor at inj_angle (x CAL_CURRENT)
 
 // Control loops
 #define VD_MAX (V_RATED * ONE_OVER_SQRT3)                                  // Maximum D-axis voltage (V)
@@ -2572,7 +2573,8 @@ FOC_FAST_CODE static void FOC_BLDC_Parameter_Measurement_Update(FOC_t *foc)
             }
             else if (foc->motor_mode == MOTOR_ESTIMATION_LQ)
             {
-                foc->v_d = 0.0f;
+                // Without the hold the q-axis torque moves a light rotor (T200: Lq 62-212 uH)
+                foc->v_d = CAL_LQ_HOLD * CAL_CURRENT * foc->bldc.Rs;
                 foc->v_q = v_inj;
             }
             else

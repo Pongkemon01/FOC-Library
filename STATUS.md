@@ -45,6 +45,13 @@ history (marked superseded where they no longer apply).
   no runaway, no trip. Without HFIFAKE unchanged (no fault). Sim-verified: the check works but is
   late, since the 0.3 x v_bus/sqrt3 margin (2.1 V at 12 V) hides back-EMF up to ~2.1 V / psi.
   Tightening `HFI_VBAL_RATIO` would trip earlier; not done (false-trip risk unmeasured).
+- Lq run holds the rotor (2026-11-02): it applied v_d = 0, so nothing held the light rotor at
+  inj_angle while the 1 kHz q-axis voltage pushed it. Now v_d = `CAL_LQ_HOLD` (0.5) x
+  `CAL_CURRENT` x Rs (~2.6 A DC d-axis) under the q injection; frequency kept at 1 kHz (at 5 kHz
+  the one-period PWM delay is 90 deg). calib_sim (blocked rotor) unchanged: Lq 10.97 vs 10.99 uH.
+  T200 bench, 3 calibration-only runs: Lq 58.4 / 56.8 / 80.1 uH (before 62-212), Ld 47.5 / 52.2 /
+  45.7 uH; the saliency-sweep fit agrees (Lq ~58.3 / 56.5 / 66.1 uH). Hardware-verified: spread
+  much smaller, one run still high. Rs in the same runs 0.157 / 0.226 / 0.167 Ohm (separate).
 - Bench oddity: the saliency sweep was sane in the bypass runs (L0 57.6 uH, A2 8.9 uH, axis
   163 deg) but nonsense in the first T200 run; the Lq spread suggests the rotor moves.
 
