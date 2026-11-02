@@ -5,6 +5,19 @@ Git history starts on 2026-10-26; this file holds the record before that and the
 status of each change (compile / sim / hardware). Newest first below; older sections are
 history (marked superseded where they no longer apply).
 
+## 2026-11-02: demo (Src/freertos.c) restructured, no behaviour change
+
+- StartDefaultTask runs five numbered steps, one function each: Measure_Current_Offsets,
+  Bus_Voltage_OK, Calibrate (3a Rs, 3b Ld/Lq, 3c apply), Saliency_Sweep (4a-4c), Speed_Test
+  (5a start, 5b follow the profile, 5c report and stop, 5d coast check). The Rs sign check, the
+  log header and the startup-event prints are their own functions; the log columns are documented
+  next to Log_Header (mode numbers included). TEST_PROFILE 4 has its own case and an invalid
+  profile is a compile error; profile 5's description no longer mentions the removed I-f.
+- Printed strings and log format unchanged. Build: RAM 78.6 %, Flash 10.1 % (same). SK3 bench,
+  profile 5: same results as the run before the change (Rs 0.02275, HFI start, 650 rows, coast
+  check clean, ISR max 2301). Earlier the same day on the SK3 (unchanged library): all profile 5
+  steps held except 20 rad/s el, where the rotor stayed still with iq up to 1.4 A on HFI.
+
 ## 2026-11-02: Blue Robotics T200 thruster (unknown motor); HFI gated on the start probe
 
 - Bench, T200 in air, no changes to motor constants (SK3 defaults), 11.36 V:

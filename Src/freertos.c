@@ -31,11 +31,17 @@
 //   MX_FREERTOS_Init     TIM1 at PWM_FREQ (TIMER_config), FOC_Init, start the ADC interrupt.
 //   ISR (ADC injected    HAL_ADCEx_InjectedConvCpltCallback: ADC counts -> FOC_Update -> TIM1
 //   end of sequence)     compare registers, and the bridge on/off for foc.outputs_enabled.
-//   StartDefaultTask     1. PWM on, measure the zero-current offsets (motor at rest)
-//                        2. check the bus voltage
-//                        3. calibrate Rs, Ld, Lq (optional, FOC_Recalc_Params after it)
-//                        4. saliency sweep (diagnostic, RUN_SALIENCY_SWEEP)
-//                        5. speed test with a log (RUN_FOC_TEST, TEST_PROFILE)
+//   StartDefaultTask     the demo sequence, one function per step:
+//                        1. PWM on, measure the zero-current offsets   Measure_Current_Offsets
+//                           (motor at rest)
+//                        2. check the bus voltage                      Bus_Voltage_OK
+//                        3. calibrate Rs, Ld, Lq, apply them           Calibrate
+//                           (optional; FOC_Init has the foc_lib.h defaults)
+//                        4. saliency sweep (diagnostic only,           Saliency_Sweep
+//                           RUN_SALIENCY_SWEEP)
+//                        5. speed test with a log (RUN_FOC_TEST,       Speed_Test
+//                           TEST_PROFILE): start, follow the profile,
+//                           report and stop, coast check
 //
 // The control runs entirely in the ISR (current loop, observers, startup, speed loop at 1 kHz):
 // a task only sets targets (foc.speed_ref / foc.is_ref) and reads the state. Keep printf and
@@ -55,7 +61,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-// ---- Demo options ----------------------------------------------------------
+// ---- Demo options (which steps run, and the speed test) ---------------------
 #define RUN_SALIENCY_SWEEP 1 // 1: after calibration, Ld-type injection at SWEEP_POINTS angles (diagnostic)
 #define SWEEP_POINTS 24
 #define RUN_FOC_TEST 1 // 1: run the speed test after calibration; 0: stop there
@@ -70,8 +76,9 @@
                        //    1500 from 10 s
                        // 3: slow sweep down for HFI_SHADOW_TEST: 1500, then 800 -> 100 at 100 rad/s^2
                        // 4: HFI from standstill: 150, 0 from 5 s, 150 from 6.5 s, 1500 from 8 s
-                       // 5: low-speed I-f steps: 1500, 150 from 2 s, 75, 50, 20, 0 every 1.5 s,
-                       //    150 from 9.5 s, 1500 from 11 s
+                       // 5: low-speed steps: 1500, 150 from 2 s, 75, 50, 20, 0 every 1.5 s,
+                       //    150 from 9.5 s, 1500 from 11 s (without HFI the motor stops below
+                       //    FOC_Min_Speed and restarts above it)
 #define HFI_SHADOW_TEST 0 // Test only. 1: measure the eSMO's low-speed limit (with TEST_PROFILE 3,
                           // then tools/hfi_threshold.py on the log): Align -> I-f start, the HFI
                           // tracker is logged beside the eSMO but never takes control
@@ -79,6 +86,7 @@
 #define ADC_INJ_SMP 0 // Injected-channel ADC sampling time code: 0 = keep CubeMX (1.5 cycles), 4 = 19.5, 5 = 61.5
 #endif
 
+// ---- Constants ---------------------------------------------------------------
 #define OFFSET_SAMPLES 64 // Zero-current offset: average of this many samples, 1 ms apart
 #define APP_PI 3.14159265359f // For log conversions (foc-lib keeps its constants internal)
 #define APP_TWO_PI 6.28318530718f
@@ -227,11 +235,46 @@ static void Bridge_Outputs(bool enable)
 }
 
 // ============================================================================
-// Demo steps (task context)
+// Demo steps (task context), in the order StartDefaultTask runs them
 // ============================================================================
 
-// Wait for a calibration run started with FOC_Start_Measurement. Returns false on an
-// over-current abort.
+// ---- Step 1: zero-current offsets -------------------------------------------
+// The current-sense chain reads ADC_RES / 2 plus an offset at zero current. Measure it with the
+// motor at rest and the bridge off (FOC_Init leaves it off); averaging removes the ADC noise.
+static void Measure_Current_Offsets(void)
+{
+    uint32_t sum_a = 0, sum_b = 0, sum_c = 0;
+    for (int i = 0; i < OFFSET_SAMPLES; i++)
+    {
+        osDelay(1); // One new ISR sample per 1 ms is plenty: the readings are only averaged
+        sum_a += foc.adc_v_a;
+        sum_b += foc.adc_v_b;
+        sum_c += foc.adc_v_c;
+    }
+    foc.adc_offset_a = (uint16_t)((sum_a + OFFSET_SAMPLES / 2) / OFFSET_SAMPLES); // Rounded mean
+    foc.adc_offset_b = (uint16_t)((sum_b + OFFSET_SAMPLES / 2) / OFFSET_SAMPLES);
+    foc.adc_offset_c = (uint16_t)((sum_c + OFFSET_SAMPLES / 2) / OFFSET_SAMPLES);
+    printf("Current-sense offsets (ADC counts): A %d, B %d, C %d\r\n", foc.adc_offset_a, foc.adc_offset_b,
+           foc.adc_offset_c);
+}
+
+// ---- Step 2: bus voltage ----------------------------------------------------
+// Without (enough) bus voltage the calibration measures garbage and nothing can run.
+static bool Bus_Voltage_OK(void)
+{
+    if (foc.v_bus >= V_BUS_MIN)
+        return true;
+    printf("!! Vbus = %f V < V_BUS_MIN (%f V): motor supply off? Calibration and run skipped.\r\n", foc.v_bus,
+           V_BUS_MIN);
+    return false;
+}
+
+// ---- Step 3: calibration (Rs, Ld, Lq) ---------------------------------------
+// Each run is started with FOC_Start_Measurement, executed by the ISR, and evaluated here once
+// it has finished. Recommendation: run it once per motor and keep the results (foc.bldc) if the
+// start-up time matters; FOC_Init's defaults are the foc_lib.h values.
+
+// Wait for the run started with FOC_Start_Measurement. Returns false on an over-current abort.
 static bool Wait_Measurement(void)
 {
     while (FOC_Measurement_Busy(&foc))
@@ -239,44 +282,13 @@ static bool Wait_Measurement(void)
     return !foc.inj_fault;
 }
 
-// Step 1: zero-current offsets of the current-sense chain. The motor must be at rest and the
-// bridge off (it is after FOC_Init). Averaging removes the ADC noise of a single sample.
-static void Measure_Current_Offsets(void)
+// Current-sign check on the recorded Rs run. The Rs run is DC on phase A (v_d > 0 at theta = 0),
+// so a correct sense chain gives i_a > 0 and i_b ~ -i_a / 2 (phases B and C share the return
+// current). The calibration itself cannot see a wrong CURRENT_SENSE_POLARITY (it uses
+// magnitudes), and an i_b far from -i_a / 2 points at a bad phase connection (T200 bench).
+// A drift between the first and last samples means the rotor still moved while Rs was recorded.
+static void Print_Rs_Run_Check(void)
 {
-    uint32_t sum_a = 0, sum_b = 0, sum_c = 0;
-    for (int i = 0; i < OFFSET_SAMPLES; i++)
-    {
-        osDelay(1);
-        sum_a += foc.adc_v_a;
-        sum_b += foc.adc_v_b;
-        sum_c += foc.adc_v_c;
-    }
-    foc.adc_offset_a = (uint16_t)((sum_a + OFFSET_SAMPLES / 2) / OFFSET_SAMPLES);
-    foc.adc_offset_b = (uint16_t)((sum_b + OFFSET_SAMPLES / 2) / OFFSET_SAMPLES);
-    foc.adc_offset_c = (uint16_t)((sum_c + OFFSET_SAMPLES / 2) / OFFSET_SAMPLES);
-    printf("Current-sense offsets (ADC counts): A %d, B %d, C %d\r\n", foc.adc_offset_a, foc.adc_offset_b,
-           foc.adc_offset_c);
-}
-
-// Step 3: Rs, then Ld and Lq, at standstill. Each run injects at most INJECTION_MAX_CURRENT.
-// Recommendation: run it once per motor and keep the results (foc.bldc) if the start-up time
-// matters; FOC_Init's defaults are the foc_lib.h values.
-static void Calibrate(void)
-{
-    printf("Measuring Rs...\r\n");
-    FOC_Start_Measurement(&foc, MOTOR_ESTIMATION_RS, 0.0f);
-    // The library ramps the voltage until the current reaches CAL_CURRENT: no motor constant needed
-    if (Wait_Measurement())
-        FOC_BLDC_Parameter_Calculation_Resistance(&foc);
-    else
-        printf("  !! aborted (over %f A, or %f A not reached: no bus / open winding): Rs not updated\r\n",
-               (double)INJECTION_MAX_CURRENT, (double)CAL_CURRENT);
-    printf("  Rs = %f ohm (ramp reached %f V)\r\n", foc.bldc.Rs, foc.inj_v);
-
-    // Current-sign check: the Rs run is DC on phase A (v_d > 0 at theta = 0), so a correct sense
-    // chain gives i_a > 0 and i_b ~ -i_a / 2. The calibration itself cannot see a wrong
-    // CURRENT_SENSE_POLARITY (it uses magnitudes). A drift between the first and last samples
-    // means the rotor was still moving while Rs was recorded.
     float m_id = 0.0f, m_ia = 0.0f, m_ib = 0.0f, first = 0.0f, last = 0.0f;
     for (int i = 0; i < INJECTION_ROUNDS; i++)
     {
@@ -292,7 +304,24 @@ static void Calibrate(void)
     printf("  signed means: i_d %f, i_a %f, i_b %f A (expect i_a > 0, i_b ~ -i_a/2)\r\n",
            m_id / INJECTION_ROUNDS, m_ia / INJECTION_ROUNDS, m_ib / INJECTION_ROUNDS);
     printf("  i_d first/last 32 samples: %f / %f A\r\n", first / 32.0f, last / 32.0f);
+}
 
+static void Calibrate(void)
+{
+    // 3a. Rs: the library ramps a DC voltage until the current reaches CAL_CURRENT (no motor
+    //     constant needed), then takes Rs from two levels
+    printf("Measuring Rs...\r\n");
+    FOC_Start_Measurement(&foc, MOTOR_ESTIMATION_RS, 0.0f);
+    if (Wait_Measurement())
+        FOC_BLDC_Parameter_Calculation_Resistance(&foc);
+    else
+        printf("  !! aborted (over %f A, or %f A not reached: no bus / open winding): Rs not updated\r\n",
+               (double)INJECTION_MAX_CURRENT, (double)CAL_CURRENT);
+    printf("  Rs = %f ohm (ramp reached %f V)\r\n", foc.bldc.Rs, foc.inj_v);
+    Print_Rs_Run_Check();
+
+    // 3b. Ld and Lq: 1 kHz injection on the d-axis, then on the q-axis (rotor held on d).
+    //     Both runs must succeed before the result is used.
     printf("Measuring Ld, Lq...\r\n");
     FOC_Start_Measurement(&foc, MOTOR_ESTIMATION_LD, 0.0f);
     bool ok = Wait_Measurement();
@@ -304,18 +333,22 @@ static void Calibrate(void)
         printf("  !! aborted on over-current: Ld/Lq not updated\r\n");
     printf("  Ld = %e H, Lq = %e H\r\n", foc.bldc.Ld, foc.bldc.Lq);
 
-    FOC_Recalc_Params(&foc); // Apply the measured values to the current loops, the observer and HFI
+    // 3c. Apply the measured values to the current loops, the observer and HFI
+    FOC_Recalc_Params(&foc);
     printf("  HFI amplitude %f V\r\n", foc.hfi_v);
 }
 
 #if RUN_SALIENCY_SWEEP
-// Step 4 (diagnostic): saliency map. The 1 kHz Ld-type injection, applied along SWEEP_POINTS
-// angles with the rotor at rest (left where the Rs run aligned it). Fit L(phi) = A0 +
-// A1 cos(phi - p1) + A2 cos(2 phi - 2 p2): A2 is the saliency HFI relies on (min L on the
-// rotor's d-axis, here near 0 or 180 deg), A1 should be ~0 (the rotor did not move).
+// ---- Step 4 (diagnostic): saliency sweep ------------------------------------
+// The 1 kHz Ld-type injection along SWEEP_POINTS angles with the rotor at rest (where the Rs run
+// aligned it), then a fit L(phi) = A0 + A1 cos(phi - p1) + A2 cos(2 phi - 2 p2). A2 is the
+// saliency HFI relies on (min L on the rotor's d-axis, here near 0 or 180 deg); A1 should be ~0
+// (the rotor did not move). Not needed to run the motor: the HFI start probes saliency itself.
 static void Saliency_Sweep(void)
 {
-    static float L[SWEEP_POINTS], xr[SWEEP_POINTS], xi[SWEEP_POINTS];
+    static float L[SWEEP_POINTS], xr[SWEEP_POINTS], xi[SWEEP_POINTS]; // static: off the small task stack
+
+    // 4a. Measure the inductance along each angle
     printf("Saliency sweep (%d points, 1 kHz, %f V):\r\n  deg  L_axis(nH)  cross_re(x1e4)  cross_im(x1e4)\r\n",
            SWEEP_POINTS, (double)(CAL_CURRENT * foc.bldc.Rs));
     for (int k = 0; k < SWEEP_POINTS; k++)
@@ -330,6 +363,7 @@ static void Saliency_Sweep(void)
                (int)(xi[k] * 1e4f));
     }
 
+    // 4b. Fourier coefficients of the 0th, 1st and 2nd harmonics (and the cross-axis 2nd)
     float s0 = 0, c1 = 0, s1 = 0, c2 = 0, s2 = 0, xc2 = 0, xs2 = 0;
     for (int k = 0; k < SWEEP_POINTS; k++)
     {
@@ -347,7 +381,8 @@ static void Saliency_Sweep(void)
     const float p2 = 0.5f * atan2f(s2, c2); // Angle of max L (q-axis)
     const float X2 = 2.0f * sqrtf(xc2 * xc2 + xs2 * xs2) / n;
 
-    float res = 0.0f; // Residual after the 0th..2nd harmonics: the measurement noise floor
+    // 4c. Residual after the fit: the measurement noise floor
+    float res = 0.0f;
     for (int k = 0; k < SWEEP_POINTS; k++)
     {
         const float p = (float)k * (APP_TWO_PI / SWEEP_POINTS);
@@ -365,9 +400,11 @@ static void Saliency_Sweep(void)
 #endif
 
 #if RUN_FOC_TEST
-// Test profiles (TEST_PROFILE): the speed reference at t_ms after the start (rad/s el, in
-// RUN_DIRECTION) and the number of 20 ms log rows. The library ramps speed_ref at SPEED_REF_SLEW,
-// and the drive is motoring only: a lower reference lets the motor coast down by its load.
+// ---- Step 5: speed test -----------------------------------------------------
+
+// Speed reference of the TEST_PROFILE at t_ms after the start (rad/s el, in RUN_DIRECTION), and
+// TEST_ROWS, the number of 20 ms log rows. The library ramps speed_ref at SPEED_REF_SLEW, and the
+// drive is motoring only: a lower reference lets the motor coast down by its load.
 #if TEST_PROFILE == 0
 #define TEST_ROWS 250
 static float Test_Speed_Ref(uint32_t t_ms) { return (t_ms >= 3000) ? 2500.0f : 1500.0f; }
@@ -401,6 +438,12 @@ static float Test_Speed_Ref(uint32_t t_ms)
         return 800.0f - 0.1f * (float)(t_ms - 2500); // 100 rad/s^2
     return 100.0f;
 }
+#elif TEST_PROFILE == 4
+#define TEST_ROWS 550
+static float Test_Speed_Ref(uint32_t t_ms)
+{
+    return (t_ms >= 8000) ? 1500.0f : (t_ms >= 6500) ? 150.0f : (t_ms >= 5000) ? 0.0f : 150.0f;
+}
 #elif TEST_PROFILE == 5
 #define TEST_ROWS 650
 static float Test_Speed_Ref(uint32_t t_ms)
@@ -409,16 +452,27 @@ static float Test_Speed_Ref(uint32_t t_ms)
          : (t_ms >= 6500) ? 20.0f : (t_ms >= 5000) ? 50.0f : (t_ms >= 3500) ? 75.0f
          : (t_ms >= 2000) ? 150.0f : 1500.0f;
 }
-#else // 4
-#define TEST_ROWS 550
-static float Test_Speed_Ref(uint32_t t_ms)
-{
-    return (t_ms >= 8000) ? 1500.0f : (t_ms >= 6500) ? 150.0f : (t_ms >= 5000) ? 0.0f : 150.0f;
-}
+#else
+#error "TEST_PROFILE must be 0..5"
 #endif
 
-// One log row. Integers only (rad/s, mV, mA, 0.1 deg), in two short printf calls: the task stack
-// is small. Columns as printed by Speed_Test (tools/hfi_threshold.py reads them by name).
+// Log: one header line, then one row every 20 ms. Integers only (rad/s, mV, mA, 0.1 deg), in two
+// short printf calls: the task stack is small. tools/hfi_threshold.py reads the columns by name.
+//   t_ms     time since the start      mode     motor_mode: 1 idle, 5 align, 6 I-f, 7 transition,
+//                                               8 running, 9 HFI start
+//   w_force  forced (I-f) speed        w_ref    ramped speed reference      w_est   eSMO speed
+//   emf_mV   eSMO back-EMF             lock     eSMO locked                 cnt     startup lock counter
+//   id/iq/ia/ib_mA  currents           vd/vq_mV voltages                    vbus_mV bus voltage
+//   brk      TIM1 break flag (over-current latched the outputs off)        moe     TIM1 main output enable
+//   isr_cyc / irq_cyc  last ISR time in CPU cycles (callback alone / from IRQ entry)
+//   HFI: on = tracker running, ctl = HFI in control, smo_hfi = eSMO minus HFI angle (0.1 deg),
+//        w_hfi = HFI speed, zp = HF response (mA), err = tracker error (0.1 deg), flt = HFI fault
+static void Log_Header(void)
+{
+    printf("t_ms mode w_force w_ref w_est emf_mV lock cnt id_mA iq_mA ia_mA ib_mA vd_mV vq_mV vbus_mV brk moe "
+           "isr_cyc irq_cyc on ctl smo_hfi w_hfi zp err flt\r\n");
+}
+
 static void Log_Row(uint32_t t_ms)
 {
     printf("%d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d", (int)t_ms, (int)foc.motor_mode,
@@ -439,11 +493,30 @@ static void Log_Row(uint32_t t_ms)
            (int)foc.hfi_fault);
 }
 
-// Step 5: speed test. Start, follow the TEST_PROFILE reference, log at ~50 Hz, stop, and check
-// that the bridge really lets the motor coast.
-static void Speed_Test(void)
+// Startup events, printed from the task because FOC_Update runs in the ISR (so up to one log row
+// late). last_mode is the motor_mode seen at the previous row.
+static void Print_Startup_Events(BLDC_Mode_t last_mode)
 {
-    // The calibration leaves the bridge energized; the direction can only be set with it off.
+    // The HFI start has finished: its saliency probe decided whether HFI can run this motor,
+    // which also sets FOC_Min_Speed
+    if (foc.motor_mode != MOTOR_STARTUP_HFI && last_mode == MOTOR_STARTUP_HFI)
+    {
+        printf("*** HFI start: probe %d mrad (expect ~-500), |Zp| +pulse %d mA, -pulse %d mA -> polarity %d "
+               "(1 kept, -1 flipped, 0 -> Align/I-f)\r\n",
+               (int)(foc.hfi_probe_e * 1000.0f), (int)(foc.hfi_zp_pos * 1000.0f), (int)(foc.hfi_zp_neg * 1000.0f),
+               (int)foc.hfi_pol);
+        printf("*** Min speed %d rad/s el (0: HFI holds any speed)\r\n", (int)FOC_Min_Speed(&foc));
+    }
+    // Closed loop reached (from the HFI start or from Align -> I-f -> transition)
+    if (foc.motor_mode == MOTOR_RUNNING && last_mode != MOTOR_RUNNING)
+        printf("*** Startup complete: closed loop at %f rad/s, id = %f A, iq = %f A\r\n", foc.omega, foc.id_ref,
+               foc.iq_ref);
+}
+
+// 5a. Prepare and start. The calibration leaves the bridge energized, and the direction can only
+//     be set with it off.
+static void Speed_Test_Start(void)
+{
     FOC_Stop(&foc);
     osDelay(2); // The ISR turns the outputs off within one PWM period
     if (!FOC_Set_Direction(&foc, RUN_DIRECTION))
@@ -461,36 +534,27 @@ static void Speed_Test(void)
     TIM1->SR = ~TIM_SR_BIF;
     isr_cyc_max = 0;
     irq_cyc_max = 0;
-    const uint32_t t0 = osKernelGetTickCount();
     FOC_Start(&foc, FOC_SPEED_CONTROL);
+}
 
-    // Columns: t_ms, motor_mode (5 align, 6 I-f, 7 transition, 8 running, 9 HFI start), forced
-    // speed, ramped reference, eSMO speed, back-EMF (mV), eSMO lock, lock counter, id/iq/ia/ib (mA),
-    // vd/vq (mV), vbus (mV), brk, moe, ISR/IRQ cycles; HFI: on = tracker running, ctl = HFI in
-    // control, smo_hfi = eSMO minus HFI angle (0.1 deg), w_hfi = HFI speed, zp = HF response (mA),
-    // err = tracker error (0.1 deg), flt = HFI fault.
-    printf("t_ms mode w_force w_ref w_est emf_mV lock cnt id_mA iq_mA ia_mA ib_mA vd_mV vq_mV vbus_mV brk moe "
-           "isr_cyc irq_cyc on ctl smo_hfi w_hfi zp err flt\r\n");
+// 5b. Follow the profile for TEST_ROWS rows of 20 ms: set the reference, report events, log.
+//     Without HFI, a reference below FOC_Min_Speed makes the library stop the motor (foc_mode
+//     becomes FOC_IDLE); the application decides when to start it again: here, once the
+//     reference is back at or above the minimum.
+static void Speed_Test_Run(void)
+{
+    const uint32_t t0 = osKernelGetTickCount();
     BLDC_Mode_t last_mode = foc.motor_mode;
     bool stopped = false;
+
+    Log_Header();
     for (int k = 0; k < TEST_ROWS; k++)
     {
         const uint32_t t_ms = osKernelGetTickCount() - t0;
         foc.speed_ref = Test_Speed_Ref(t_ms);
 
-        // Events, printed here because FOC_Update runs in the ISR (up to one row late)
-        if (foc.motor_mode == MOTOR_RUNNING && last_mode != MOTOR_RUNNING)
-            printf("*** Startup complete: closed loop at %f rad/s, id = %f A, iq = %f A\r\n", foc.omega,
-                   foc.id_ref, foc.iq_ref);
-        if (foc.motor_mode != MOTOR_STARTUP_HFI && last_mode == MOTOR_STARTUP_HFI)
-            printf("*** HFI start: probe %d mrad (expect ~-500), |Zp| +pulse %d mA, -pulse %d mA -> polarity %d "
-                   "(1 kept, -1 flipped, 0 -> Align/I-f)\r\n",
-                   (int)(foc.hfi_probe_e * 1000.0f), (int)(foc.hfi_zp_pos * 1000.0f), (int)(foc.hfi_zp_neg * 1000.0f),
-                   (int)foc.hfi_pol);
-        if (foc.motor_mode != MOTOR_STARTUP_HFI && last_mode == MOTOR_STARTUP_HFI)
-            printf("*** Min speed %d rad/s el (0: HFI holds any speed)\r\n", (int)FOC_Min_Speed(&foc));
-        // Below FOC_Min_Speed the library stops the motor; start again once the reference is back up
-        if (foc.foc_mode == FOC_IDLE && !stopped)
+        Print_Startup_Events(last_mode);
+        if (!stopped && foc.foc_mode == FOC_IDLE)
         {
             printf("*** Stopped: speed_ref %d below min speed %d rad/s el\r\n", (int)foc.speed_ref,
                    (int)FOC_Min_Speed(&foc));
@@ -507,27 +571,42 @@ static void Speed_Test(void)
         Log_Row(t_ms);
         osDelay(20);
     }
+}
 
+// 5c. Report and stop. The flux linkage is measured while running on the eSMO (above
+//     2 x OMEGA_FORCE). Recommendation: once it has settled, set FLUX_LINKAGE to it
+//     (foc_lib_conf.h), so the first start (and FOC_Min_Speed before a run) uses the real value.
+static void Speed_Test_Stop(void)
+{
     printf("ISR cycles: max %lu, budget %lu per period (%d Hz PWM)\r\n", (unsigned long)isr_cyc_max,
            (unsigned long)(SystemCoreClock / (uint32_t)PWM_FREQ), (int)PWM_FREQ);
     printf("IRQ cycles (handler entry to callback end): max %lu\r\n", (unsigned long)irq_cyc_max);
     printf("Stopping FOC control... (vbus_fault = %d, vbus_uv_fault = %d)\r\n", (int)foc.vbus_fault,
            (int)foc.vbus_uv_fault);
-    // Measured while running on the eSMO (above 2 x OMEGA_FORCE). Recommendation: once it has
-    // settled, set FLUX_LINKAGE to it (foc_lib_conf.h), so the first start also uses the real value.
     printf("Flux linkage: measured %d nWb (FLUX_LINKAGE %d nWb)\r\n", (int)(foc.bldc.flux * 1e9f),
            (int)(FLUX_LINKAGE * 1e9f));
     FOC_Stop(&foc);
     FOC_Set_Current_Limit(&foc, I_RATED);
+}
 
-    // Coast check: the rotor is still spinning here; with the bridge off ia/ib must stay ~0,
-    // otherwise the bridge is still conducting (braking the motor)
+// 5d. Coast check: the rotor is still spinning here. With the bridge off, ia/ib must stay ~0;
+//     otherwise the bridge still conducts (and brakes the motor).
+static void Coast_Check(void)
+{
     for (int k = 0; k < 25; k++)
     {
         osDelay(20);
         printf("coast %d: mode %d ia_mA %d ib_mA %d moe %d\r\n", (k + 1) * 20, (int)foc.motor_mode,
                (int)(foc.i_a * 1000.0f), (int)(foc.i_b * 1000.0f), (TIM1->BDTR & TIM_BDTR_MOE) ? 1 : 0);
     }
+}
+
+static void Speed_Test(void)
+{
+    Speed_Test_Start(); // 5a
+    Speed_Test_Run();   // 5b
+    Speed_Test_Stop();  // 5c
+    Coast_Check();      // 5d
 }
 #endif
 
@@ -612,38 +691,37 @@ void StartDefaultTask(void *argument)
     printf("TIM1 CR2 = 0x%08lx, BDTR = 0x%08lx\r\n", (unsigned long)TIM1->CR2, (unsigned long)TIM1->BDTR);
     osDelay(1000); // Let the supply and the sense amplifiers settle
 
-    // 1. PWM on (bridge still off: FOC_Init left outputs_enabled false), so the ISR samples the
-    //    currents; then the zero-current offsets
+    // Step 1: PWM on, so the ISR samples the currents (the bridge stays off: FOC_Init left
+    //         outputs_enabled false), then the zero-current offsets
     Start_PWM();
     osDelay(50);
     Measure_Current_Offsets();
     printf("PWM resolution %d, Vbus %f V\r\n=======================================\r\n", foc.pwm_resolution,
            foc.v_bus);
 
-    // 2. No (or too low) bus voltage: calibration would measure garbage and nothing can run
-    if (foc.v_bus < V_BUS_MIN)
+    // Step 2: bus voltage; without it, stop here
+    if (!Bus_Voltage_OK())
     {
-        printf("!! Vbus = %f V < V_BUS_MIN (%f V): motor supply off? Calibration and run skipped.\r\n", foc.v_bus,
-               V_BUS_MIN);
         for (;;)
             osDelay(1000);
     }
 
-    // 3. Calibration
+    // Step 3: calibration (Rs, Ld, Lq)
     Calibrate();
 
 #if RUN_SALIENCY_SWEEP
-    // 4. Saliency map (diagnostic)
+    // Step 4: saliency sweep (diagnostic)
     Saliency_Sweep();
 #endif
 
 #if RUN_FOC_TEST
-    // 5. Speed test
+    // Step 5: speed test
     Speed_Test();
 #else
     printf("FOC run skipped (RUN_FOC_TEST = 0)\r\n");
 #endif
 
+    // Done: the drive is stopped; the ISR keeps sampling with the bridge off
     for (;;)
     {
         osDelay(5000);
