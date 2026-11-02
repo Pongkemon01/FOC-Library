@@ -62,7 +62,7 @@
 #define RUN_DIRECTION NORMAL_DIRECTION // NORMAL_DIRECTION or REVERSE_DIRECTION
 #define TEST_I_MAX 5.0f // Current cap during the test (A). Recommended on a bench: well below I_RATED,
                         // and keep the input power below what the supply can deliver
-#define TEST_PROFILE 4 // Speed reference over time (rad/s el), see Test_Speed_Ref:
+#define TEST_PROFILE 5 // Speed reference over time (rad/s el), see Test_Speed_Ref:
                        // 0: 1500, 2500 from 3 s
                        // 1: gentle staircase for a propeller load: 1500, ramps to 2000 and 2500
                        //    (the bench 12 V 5 A supply collapses at ~20 W: slow ramps, no 3000)
@@ -70,6 +70,8 @@
                        //    1500 from 10 s
                        // 3: slow sweep down for HFI_SHADOW_TEST: 1500, then 800 -> 100 at 100 rad/s^2
                        // 4: HFI from standstill: 150, 0 from 5 s, 150 from 6.5 s, 1500 from 8 s
+                       // 5: low-speed I-f steps: 1500, 150 from 2 s, 75, 50, 20, 0 every 1.5 s,
+                       //    150 from 9.5 s, 1500 from 11 s
 #define HFI_SHADOW_TEST 0 // Test only. 1: measure the eSMO's low-speed limit (with TEST_PROFILE 3,
                           // then tools/hfi_threshold.py on the log): Align -> I-f start, the HFI
                           // tracker is logged beside the eSMO but never takes control
@@ -398,6 +400,14 @@ static float Test_Speed_Ref(uint32_t t_ms)
     if (t_ms < 9500)
         return 800.0f - 0.1f * (float)(t_ms - 2500); // 100 rad/s^2
     return 100.0f;
+}
+#elif TEST_PROFILE == 5
+#define TEST_ROWS 650
+static float Test_Speed_Ref(uint32_t t_ms)
+{
+    return (t_ms >= 11000) ? 1500.0f : (t_ms >= 9500) ? 150.0f : (t_ms >= 8000) ? 0.0f
+         : (t_ms >= 6500) ? 20.0f : (t_ms >= 5000) ? 50.0f : (t_ms >= 3500) ? 75.0f
+         : (t_ms >= 2000) ? 150.0f : 1500.0f;
 }
 #else // 4
 #define TEST_ROWS 550

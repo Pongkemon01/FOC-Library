@@ -453,6 +453,7 @@ typedef struct
     float startup_omega;   // Open-loop (forced) speed for startup (electrical rad/s)
     float angle_offset;    // Transition: forced minus observer angle, decays to 0
     uint32_t bemf_counter; // Counter for back-EMF detection during startup
+    bool if_low;           // Speed mode, no HFI: I-f below the eSMO's speed range (MOTOR_STARTUP_RAMP)
 } FOC_t;
 
 // ============================================================================

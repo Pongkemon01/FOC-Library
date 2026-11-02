@@ -99,6 +99,8 @@ int main(int argc, char **argv)
     const int prof_low = getenv("PROF") && !strcmp(getenv("PROF"), "low");
     const int prof_bench = getenv("PROF") && !strcmp(getenv("PROF"), "bench");
     if (getenv("SHADOW") && atoi(getenv("SHADOW"))) foc.hfi_takeover = false;
+    double p_acc = 0, p_min = 1e9, t_pmin = 0; int p_n = 0;
+    const int prof_steps = getenv("PROF") && !strcmp(getenv("PROF"), "steps");
     const int prof_start = getenv("PROF") && !strcmp(getenv("PROF"), "start");
     const double sat = getenv("SAT") ? atof(getenv("SAT")) : 0.0;
 if (getenv("IMAX")) FOC_Set_Current_Limit(&foc, (float)atof(getenv("IMAX"))); /* test current cap */
@@ -122,11 +124,16 @@ if (getenv("IMAX")) FOC_Set_Current_Limit(&foc, (float)atof(getenv("IMAX"))); /*
 
         if (t_coast > 0 && t >= t_coast && t - Ts < t_coast) FOC_Coast(&foc);
 
-        if (prof_start) foc.speed_ref = (t >= 3.0) ? 1500.0f : 150.0f;
+        if (prof_steps) foc.speed_ref = (t >= 11.0) ? 1500.0f : (t >= 9.5) ? 150.0f : (t >= 8.0) ? 0.0f : (t >= 6.5) ? 20.0f : (t >= 5.0) ? 50.0f : (t >= 3.5) ? 75.0f : (t >= 2.0) ? 150.0f : 1500.0f;
+        else if (prof_start) foc.speed_ref = (t >= 3.0) ? 1500.0f : 150.0f;
         else if (prof_bench) foc.speed_ref = (t >= 10.0) ? 1500.0f : (t >= 8.5) ? 0.0f : (t >= 2.5) ? 150.0f : 1500.0f;
         else if (prof_low) foc.speed_ref = (t >= 7.0) ? 1500.0f : (t >= 5.0) ? 0.0f : (t >= 2.0) ? 150.0f : 1500.0f;
         else if (t >= 3.0) foc.speed_ref = 2500.0f;
         FOC_Update(&foc);
+        if (prof_steps && foc.outputs_enabled) { /* electrical power (motoring only): lowest 10 ms mean */
+            p_acc += 1.5 * (foc.v_d * id + foc.v_q * iq);
+            if (++p_n == 200) { double pm = p_acc / p_n; if (t > (getenv("PMIN_T") ? atof(getenv("PMIN_T")) : 1.5) && t < (getenv("PMAX_T") ? atof(getenv("PMAX_T")) : 1e9) && pm < p_min) { p_min = pm; t_pmin = t; } p_acc = 0; p_n = 0; }
+        }
         /* HFIFAKE=deg: from HFIFAKE_T s, a broken tracker in control reads omega 0 and an angle
            that deg lags the rotor (torque still forward), the bench runaway seen on the T200 */
         if (fake_t >= 0 && t >= fake_t && foc.hfi_control) { foc.hfi_theta = (float)fmod(th - fake + 4 * M_PI, 2 * M_PI); foc.hfi_omega = 0.0f; }
@@ -242,5 +249,6 @@ if (getenv("IMAX")) FOC_Set_Current_Limit(&foc, (float)atof(getenv("IMAX"))); /*
     }
     if (t_coast > 0) printf("\n  after FOC_Coast at %.2f s (speed %.0f rad/s el): peak winding current %.1f A", t_coast, wm * p, brake_peak);
     printf("\n");
+    if (prof_steps) printf("  lowest 10 ms electrical power after 1.5 s: %.3f W at %.2f s\n", p_min, t_pmin);
     return 0;
 }

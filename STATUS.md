@@ -64,6 +64,24 @@ history (marked superseded where they no longer apply).
 - Bench oddity: the saliency sweep was sane in the bypass runs (L0 57.6 uH, A2 8.9 uH, axis
   163 deg) but nonsense in the first T200 run; the Lq spread suggests the rotor moves.
 
+- Low-speed I-f (2026-11-02): speed mode without HFI (`!hfi_salient`, or `FOC_HFI 0`). When
+  `speed_ref_ramp` falls below the eSMO lock speed (`IF_LOW_ENTER` x `MIN_BEMF_AMPLITUDE` / flux),
+  MOTOR_RUNNING goes to MOTOR_STARTUP_RAMP with `if_low`: forced angle from the present angle and
+  speed, iq = `I_STARTUP`, forced speed follows the reference (decel `IF_LOW_DECEL` 200 rad/s^2,
+  motoring only) down to a standstill hold. Above `IF_LOW_EXIT` (2x) it accelerates to
+  `OMEGA_FORCE` and re-locks through the normal RAMP -> TRANSITION. Damping (`IF_LOW_DAMP` 5 ms):
+  control angle pulled back by 5 ms x (eSMO speed - forced speed), faded out below 1/4 of the lock
+  speed (plain I-f hunted: sim true speed 23-147 at ref 100). Startup with a low reference goes
+  straight into it. Sim (`speed_sim PROF=steps`, T200-like `PRS=0.139 PLS=44e-6`, Lq/Ld 1.12, psi
+  0.98 mWb): holds 150 (eSMO), 75/50/20 within ~2 rad/s el, 0 true 0, back to 1500; power dips
+  -1.4 W (entry) / -2.2 W (exit) for ~10 ms (existing startup transition -2.7 W). HFI sims
+  (`PROF=low`, `PROF=start`) byte-identical. New freertos.c `TEST_PROFILE 5` (now the default).
+  T200 bench, profile 5: eSMO held 150 and 75 (estimate 50-82 at 75), I-f at 50/20/0, exit at
+  ~10 s through TRANSITION to 1500 held, no fault or coast, isr_cyc max 1762. The eSMO estimate
+  in I-f is too weak to show the true speed (21-34 at a forced 50), so whether the rotor followed
+  smoothly could not be logged; the user saw the propeller turn smoothly at the slow steps and
+  stop at 0. Hardware-verified (T200, no load, one run).
+
 ## 2026-10-30: self-commissioning (unknown motor)
 
 - Calibration no longer needs the motor constants. Rs run: DC voltage ramps (ceiling 0.25 x v_bus
