@@ -76,10 +76,13 @@ history (marked superseded where they no longer apply).
   psi 0.98 mWb): min 153, ref 150 stops; HFI sims byte-identical. T200 bench, profile 5: min 238
   rad/s el at the first start (default FLUX_LINKAGE 0.63 mWb), 107 after running (measured flux
   1.574 mWb); held 1500 and 150, stopped at ref 75, restarted at 150 (probe again -21 mrad, start
-  Align -> I-f), 1500 held, no fault, isr_cyc max 1779. Hardware-verified. Open: the measured flux
-  1.57 mWb disagrees with the earlier T200 runs (0.84-0.98 mWb; KV-based estimate ~0.98), so the
-  minimum may be too low (bench at 75: estimate 50-82); set FLUX_LINKAGE for the T200 or check
-  Flux_Estimate.
+  Align -> I-f), 1500 held, no fault, isr_cyc max 1779. Hardware-verified.
+- T200 flux is ~1.57 mWb, not 0.98: at a steady 1500 rad/s el the logged commanded voltage gives
+  (vq - Rs iq) / w = (2.412 - 0.06) / 1500 = 1.57 mWb (vd 0.15 V, dead time ~0.02 V), matching the
+  estimate (1.574). The earlier 0.84-0.98 / 1.09 mWb were runs that spent too little time above
+  FLUX_EST_OMEGA_MIN for the 0.5 s LPF to converge from FLUX_LINKAGE 0.63 mWb. So the T200 minimum
+  of 107 rad/s el is consistent; before the flux is measured the minimum uses FLUX_LINKAGE (238,
+  conservative). For a T200 build, FLUX_LINKAGE 1.57e-3 in foc_lib_conf.h.
 
 ## 2026-10-30: self-commissioning (unknown motor)
 
