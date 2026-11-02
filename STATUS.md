@@ -5,6 +5,30 @@ Git history starts on 2026-10-26; this file holds the record before that and the
 status of each change (compile / sim / hardware). Newest first below; older sections are
 history (marked superseded where they no longer apply).
 
+## 2026-11-02: Blue Robotics T200 thruster (unknown motor); HFI gated on the start probe
+
+- Bench, T200 in air, no changes to motor constants (SK3 defaults), 11.36 V:
+  - Calibration: Rs 0.169-0.196 Ohm (top level 5.19 A), Ld 51-64 uH. Lq is not repeatable
+    (62 / 70 / 212 uH over three runs) and the saliency sweep gives nonsense (L ~ 10 mH near
+    60/240 deg): the light, low-cogging rotor probably moves under q-axis injection. Open.
+  - HFI start probe -82..-100 mrad (SK3: ~-370): not salient enough -> Align -> I-f, eSMO lock
+    at ~500 rad/s el, closed loop. Flux measured 0.98 mWb.
+  - Before the fix: the running HFI tracker still took over below HFI_OMEGA_LOW (~450 rad/s el),
+    lost the angle ~0.3 s later and the motor ran away near no-load speed (vq at the limit,
+    estimate 0) for ~11 s. No fault caught it.
+- Fix: `hfi_salient` (set at each HFI start, cleared when the probe fails): the tracker never
+  starts, so never takes over, for the rest of that run. Shadow test unaffected (stays true).
+  Sim: salient cases (`speed_sim` PROF=start SAT=0.01, PROF=low; HFI_K 0.14) byte-identical;
+  a T200-like plant (PRS 0.19, PLS 60e-6, Lq/Ld 1.05, 0.98 mWb, PROF=bench) took over at 293 and
+  faulted before, now stays on the eSMO and goes IDLE at 8.6 s when the eSMO loses lock.
+- Bench after the fix (hardware-verified, TEST_PROFILE 4): eSMO in control throughout, holds the
+  150 rad/s el step (estimate 95-180), at the 0 step loses lock and coasts to IDLE; the demo does
+  not restart, so the 150 / 1500 steps after it are not run. No runaway. ISR max 1746 cycles
+  (tracker off).
+- Not covered: low-speed / standstill holding on a non-salient motor (needs HFI or another
+  low-speed estimator); runaway detection (vq saturated with a near-zero speed estimate) while
+  HFI is in control on a salient motor.
+
 ## 2026-10-30: self-commissioning (unknown motor)
 
 - Calibration no longer needs the motor constants. Rs run: DC voltage ramps (ceiling 0.25 x v_bus

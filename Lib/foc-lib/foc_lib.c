@@ -1164,6 +1164,7 @@ void FOC_Init(FOC_t *foc, uint32_t pwm_res)
     foc->inj_fault = false;
     foc->inj_angle = 0.0f;
     foc->hfi_takeover = true;
+    foc->hfi_salient = true;
     foc->hfi_pol = 0;
     foc->hfi_on = false;
     foc->hfi_control = false;
@@ -1868,7 +1869,7 @@ FOC_FAST_CODE static void FOC_Current_Loop_HFI(FOC_t *foc)
             return;
         }
         const float w = fabsf(foc->smo.omega_est);
-        if (!foc->hfi_on && w < HFI_OMEGA_ON)
+        if (!foc->hfi_on && foc->hfi_salient && w < HFI_OMEGA_ON)
         {
             HFI_Start(foc, foc->smo.theta_est, foc->smo.omega_est);
         }
@@ -2037,6 +2038,7 @@ FOC_FAST_CODE static void FOC_BLDC_Startup_Update(FOC_t *foc)
             foc->hfi_zp_pos = 0.0f;
             foc->hfi_zp_neg = 0.0f;
             foc->hfi_probe_e = 0.0f;
+            foc->hfi_salient = true;
             foc->motor_mode = MOTOR_STARTUP_HFI;
         }
 #endif
@@ -2106,6 +2108,7 @@ FOC_FAST_CODE static void FOC_BLDC_Startup_Update(FOC_t *foc)
             // No saliency: the tracker reads ~0 at any angle. Do not pulse at an unknown angle.
             if (foc->hfi_probe_e > -HFI_PROBE_MIN)
             {
+                foc->hfi_salient = false; // Nor let the tracker take over later in this run
                 foc->hfi_pol = 0;
                 foc->hfi_on = false;
                 foc->motor_mode = MOTOR_STARTUP_ALIGN;

@@ -421,6 +421,8 @@ typedef struct
     float hfi_zp_pos, hfi_zp_neg;   // Mean |Zp| (A) during the +/- pulses, diagnostic
     float hfi_probe;                // Injection axis offset (rad): HFI_PROBE_ANGLE during the probe (PLL frozen), else 0
     float hfi_probe_e;              // Mean tracker error during the probe (rad), diagnostic
+    bool hfi_salient;               // false once the start's probe found too little saliency: the
+                                    // tracker stays off for that run (eSMO only)
     float hfi_v;                    // Square-wave amplitude (V), sized from bldc.Ls (HFI_STEP_CURRENT)
     bool hfi_on;                    // Tracker running (injecting)
     bool hfi_control;               // true: the transforms use the HFI angle; false: the eSMO's
