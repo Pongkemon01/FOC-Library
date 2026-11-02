@@ -58,6 +58,9 @@ history (marked superseded where they no longer apply).
   calibration-only runs: Rs 0.1389 / 0.1397 / 0.1386 Ohm, Ld 43.7 / 43.8 / 44.0 uH, Lq 48.4 /
   49.1 / 49.7 uH, i_b/i_a -0.56 / -0.52 / -0.42 (ramp 0.73 V, was 0.81-1.12 V). Hardware-verified.
   The T200 figures above this line were taken with the bad connection.
+  Probe rechecked with the good connection (normal build): -97 mrad (needs < -200), sweep A2 2.3 uH
+  on L0 45 uH, so the T200 really is too weakly salient for HFI; the gate (7e6abc3) stays. Run:
+  Align -> I-f -> eSMO, 1500 then 150 rad/s el held, no fault. Rs that run 0.126 Ohm.
 - Bench oddity: the saliency sweep was sane in the bypass runs (L0 57.6 uH, A2 8.9 uH, axis
   163 deg) but nonsense in the first T200 run; the Lq spread suggests the rotor moves.
 
