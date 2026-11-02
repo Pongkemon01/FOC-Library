@@ -42,8 +42,8 @@ history (marked superseded where they no longer apply).
     INJECTION_ROUNDS settle block. Sim (calib_sim 1.2): Rs 0.0220 (true 0.0220), VDT case 0.0224,
     1 Ohm plant 0.9925. Bench (hardware-verified, normal build): 0.0685 V -> 2.33 A,
     0.137 V -> 5.31 A, Rs 0.02303 Ohm, Ld/Lq 5.64/7.44 uH, HFI start and 150/1500 holds as before.
-  - ISR max ~2230 cycles (IRQ ~2290), above the ~1550 quoted earlier, still within the
-    3600 budget; not investigated.
+  - ISR max ~2230 cycles (IRQ ~2290) of 3600: not a regression. The ~1550 in CLAUDE.md predates
+    HFI (always on since 63a08c7); bench maxima with HFI were 2008-2213 (sections below). CLAUDE.md updated.
 
 ## 2026-10-30: no pole-pair parameter; flux linkage measured while running
 
