@@ -54,8 +54,9 @@
 // Calibration. The Rs run ramps a DC voltage until the current reaches CAL_CURRENT (fault if it
 // gets to CAL_V_MAX_RATIO * v_bus first), then measures at half that voltage and at the full one;
 // Rs is the slope, which cancels the inverter's voltage error only where that error is constant.
-// Before recording the low level, the DC field pulls the unloaded rotor into alignment; its swing
-// (back-EMF) biased Rs at 20 kHz when only INJECTION_ROUNDS were allowed.
+// Before recording, the full level holds while the DC field pulls the unloaded rotor into
+// alignment; its swing (back-EMF) biased Rs at 20 kHz when only INJECTION_ROUNDS were allowed, and
+// it also stops the ramp early, so the level is scaled back to CAL_CURRENT after the hold.
 #define RS_ALIGN_ROUNDS ((uint32_t)(0.3f * PWM_FREQ))
 #define CAL_V_MAX_RATIO 0.25f // Ramp ceiling: fraction of the bus voltage
 #define CAL_RAMP_TIME 1.0f    // s for the ramp to reach that ceiling
@@ -2482,12 +2483,12 @@ FOC_FAST_CODE static void FOC_BLDC_Parameter_Measurement_Update(FOC_t *foc)
             return;
         }
 
-        // The Rs run holds two DC levels: low for RS_ALIGN_ROUNDS (the rotor swings into
-        // alignment; its back-EMF would bias the reading) + INJECTION_ROUNDS recorded, then high
-        // for INJECTION_ROUNDS settling + INJECTION_ROUNDS recorded. The Ld/Lq runs have one
+        // The Rs run holds the high level for RS_ALIGN_ROUNDS (the rotor swings into alignment;
+        // its back-EMF would bias the reading), then two DC levels, low and high, each
+        // INJECTION_ROUNDS settling + INJECTION_ROUNDS recorded. The Ld/Lq runs have one
         // settle + record block.
         const bool rs_run = (foc->motor_mode == MOTOR_ESTIMATION_RS);
-        const uint32_t rs_low_end = RS_ALIGN_ROUNDS + INJECTION_ROUNDS;
+        const uint32_t rs_low_end = RS_ALIGN_ROUNDS + 2u * INJECTION_ROUNDS;
         const uint32_t rounds_total = rs_run ? rs_low_end + 2u * INJECTION_ROUNDS : 2u * INJECTION_ROUNDS;
 
         if (rs_run && foc->inj_ramp)
@@ -2525,7 +2526,10 @@ FOC_FAST_CODE static void FOC_BLDC_Parameter_Measurement_Update(FOC_t *foc)
                 foc->rs_low_vd_sum = 0.0f;
                 foc->rs_low_id_sum = 0.0f;
             }
-            foc->v_d = (foc->inj_n < rs_low_end) ? 0.5f * foc->inj_v : foc->inj_v;
+            // The alignment hold runs at the full level: the swinging rotor's back-EMF stops the
+            // ramp early (bench: 5.25 A during the ramp, 6.1 A once aligned), corrected below
+            const bool low = (foc->inj_n >= RS_ALIGN_ROUNDS && foc->inj_n < rs_low_end);
+            foc->v_d = low ? 0.5f * foc->inj_v : foc->inj_v;
             foc->v_q = 0.0f;
         }
         else
@@ -2556,8 +2560,15 @@ FOC_FAST_CODE static void FOC_BLDC_Parameter_Measurement_Update(FOC_t *foc)
         // Measure the resulting voltages and currents  (from the previous PWM cycle)
         Clarke_Park_Transform(foc->i_a, foc->i_b, foc->inj_angle, &(foc->i_d), &(foc->i_q));
 
+        // End of the alignment hold: scale the level back to CAL_CURRENT (only down, so a motor
+        // that stopped at the ramp ceiling keeps it)
+        if (rs_run && foc->inj_n == RS_ALIGN_ROUNDS - 1u && fabsf(foc->i_d) > CAL_CURRENT)
+        {
+            foc->inj_v *= CAL_CURRENT / fabsf(foc->i_d);
+        }
+
         // Accumulate injected voltages and measured currents after certain rounds
-        if (rs_run && foc->inj_n >= RS_ALIGN_ROUNDS && foc->inj_n < rs_low_end)
+        if (rs_run && foc->inj_n >= rs_low_end - INJECTION_ROUNDS && foc->inj_n < rs_low_end)
         {
             // Low DC level of the Rs run: only the means are needed
             foc->rs_low_vd_sum += foc->v_d;

@@ -36,8 +36,13 @@ history (marked superseded where they no longer apply).
     flux 0.664 mWb.
   - Wrong defaults (`-DRS=0.2f -DLS=70e-6f -DFLUX_LINKAGE=0.003f`): Rs 0.02212 Ohm, Ld 5.49 uH,
     Lq 7.42 uH, hfi_v 0.0697 V, same start and speed holds, flux 0.6656 mWb (from 3.0 mWb).
-  - Notes: the ramp's top level reaches 6.14 A, ~17 % above `CAL_CURRENT` (5.25 A); the ramp step
-    overshoots. ISR max ~2230 cycles (IRQ ~2290), above the ~1550 quoted earlier, still within the
+  - The ramp's top level reached 6.14 A, ~17 % above `CAL_CURRENT` (5.25 A): the swinging rotor's
+    back-EMF stops the ramp early. Fixed 2026-11-02: the alignment hold runs at the full level and
+    then scales it back to `CAL_CURRENT` (down only); the low level gets its own
+    INJECTION_ROUNDS settle block. Sim (calib_sim 1.2): Rs 0.0220 (true 0.0220), VDT case 0.0224,
+    1 Ohm plant 0.9925. Bench (hardware-verified, normal build): 0.0685 V -> 2.33 A,
+    0.137 V -> 5.31 A, Rs 0.02303 Ohm, Ld/Lq 5.64/7.44 uH, HFI start and 150/1500 holds as before.
+  - ISR max ~2230 cycles (IRQ ~2290), above the ~1550 quoted earlier, still within the
     3600 budget; not investigated.
 
 ## 2026-10-30: no pole-pair parameter; flux linkage measured while running
