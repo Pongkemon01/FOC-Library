@@ -5,6 +5,41 @@ Git history starts on 2026-10-26; this file holds the record before that and the
 status of each change (compile / sim / hardware). Newest first below; older sections are
 history (marked superseded where they no longer apply).
 
+## 2026-10-30: self-commissioning (unknown motor)
+
+- Calibration no longer needs the motor constants. Rs run: DC voltage ramps (ceiling 0.25 x v_bus
+  in 1 s) until |i_d| reaches `CAL_CURRENT` (0.35 x I_RATED = 5.25 A); at the ceiling it accepts
+  >= 0.2 x `CAL_CURRENT` (high-R motors), else `inj_fault` (no bus, open winding). Then the
+  existing two-point Rs at half / full of that voltage. Ld/Lq amplitude `CAL_CURRENT * Rs`
+  (|Z| >= Rs). `INJECTION_VOLTAGE`, `INJECTION_VOLTAGE_RS_LOW` removed.
+- Acceptance: broad physical limits (Rs 1 mOhm..50 Ohm, L 0.5 uH..0.1 H, Lq/Ld within 4x)
+  instead of +-4x around RS/LS (`CAL_PARAM_TOL` removed).
+- HFI amplitude `foc->hfi_v = HFI_STEP_CURRENT * Ls / Ts` (0.54 A step; 0.0756 V at 7 uH, cap
+  5 % of V_RATED), recomputed by `FOC_Recalc_Params`. `HFI_VOLTAGE` removed. The HF current step
+  stays the same on any motor, so `HFI_ZP_MIN` stays absolute. `HFI_POL_CURRENT` = 0.4 x I_RATED.
+- Flux estimate accepted within FLUX_LINKAGE /10 .. x10 (was 0.5..2x).
+- Sim-verified: calib_sim with wrong library defaults (-DRS=0.2 -DLS=70e-6, and 0.0044 / 1.4e-6)
+  against an SK3 plant (new env PRS/PLS) reads Rs 0.0220 and the same L as before; other plants
+  0.004..2 Ohm, 1.4 uH..2 mH all measured within the pre-existing +16 % L bias. speed_sim
+  (PROF=start/bench, HFI start) with 5x wrong RS/LS/FLUX_LINKAGE in both directions: identical
+  start and holds, flux converges (-3.5..+1.3 %; +22 % from 3.0 mWb in the 5 s start profile, still
+  settling). A 0.2 Ohm / 70 uH / 3 mWb plant: HFI start, holds 1500, flux -0.1 %. run_sims.sh:
+  small changes only (hfi_v 0.0756 vs 0.075 V; k_nosal Align transient 4.2 A vs 3.2 A, the
+  non-salient tracker angle being arbitrary). Compile-verified (`pio run`).
+- Not covered: the first I-f start (FOC_HFI 0 or HFI fallback) still checks the back-EMF against
+  `FLUX_LINKAGE` (`EMF_PLAUSIBLE_RATIO`), and `OMEGA_FORCE`, `I_STARTUP`, the speed-loop gain
+  (`SPEED_PLANT_GAIN`, inertia), `HFI_K` and `HFI_OMEGA_LOW` stay fixed. A low-flux motor's first
+  I-f start can coast out.
+- Bench 2026-11-02 (hardware-verified, Vbus 11.36 V, TEST_PROFILE 4, no load), two builds:
+  - Normal: Rs 0.02311 Ohm (points 0.0795 V -> 2.70 A, 0.159 V -> 6.14 A), Ld 5.63 uH, Lq 7.45 uH,
+    hfi_v 0.0706 V, HFI start (probe -367 mrad, polarity kept), holds 150 and 1500 rad/s el,
+    flux 0.664 mWb.
+  - Wrong defaults (`-DRS=0.2f -DLS=70e-6f -DFLUX_LINKAGE=0.003f`): Rs 0.02212 Ohm, Ld 5.49 uH,
+    Lq 7.42 uH, hfi_v 0.0697 V, same start and speed holds, flux 0.6656 mWb (from 3.0 mWb).
+  - Notes: the ramp's top level reaches 6.14 A, ~17 % above `CAL_CURRENT` (5.25 A); the ramp step
+    overshoots. ISR max ~2230 cycles (IRQ ~2290), above the ~1550 quoted earlier, still within the
+    3600 budget; not investigated.
+
 ## 2026-10-30: no pole-pair parameter; flux linkage measured while running
 
 - The pole-pair count is not used anywhere in the control (all electrical units); `POLE_PAIRS`

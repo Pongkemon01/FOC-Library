@@ -22,8 +22,7 @@ int main(int argc, char **argv)
     double L[SWEEP_POINTS], xr[SWEEP_POINTS];
     for (int k = 0; k < SWEEP_POINTS; k++) {
         double ia = 0, ib = 0; uint32_t pa = PWM_RES / 2, pb = PWM_RES / 2, pc = PWM_RES / 2;
-        foc.inj_angle = (float)k * (TWO_PI / SWEEP_POINTS);
-        foc.foc_mode = FOC_CALIBRATION; foc.motor_mode = MOTOR_ESTIMATION_LD; foc.inj_n = 0; foc.inj_start_flag = true;
+        FOC_Start_Measurement(&foc, MOTOR_ESTIMATION_LD, (float)k * (TWO_PI / SWEEP_POINTS));
         for (int n = 0; n < 20000 && foc.inj_start_flag; n++) {
             double pib = -0.5 * ia + 0.8660254037844386 * ib; /* phase b current */
             int aa = (int)lround(ADC_OFFSET + ia / A_PER_LSB + (rand() % 5 - 2)), ab = (int)lround(ADC_OFFSET + pib / A_PER_LSB + (rand() % 5 - 2));

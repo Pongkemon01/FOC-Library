@@ -51,15 +51,24 @@
 #define HARM_OMEGA_MIN 300.0f     // Active above this |omega| (electrical rad/s)
 #define HARM_DELAY_TS 1.5f        // PWM delay seen by the harmonic, in periods (as IPARK_DELAY_COMP)
 
-// Calibration. Rs is measured at two DC levels (INJECTION_VOLTAGE_RS_LOW, then INJECTION_VOLTAGE)
-// and taken from the difference, which cancels the inverter's voltage error only where that error
-// is constant. Before recording the low level, the DC field pulls the unloaded rotor into
-// alignment; its swing (back-EMF) biased Rs at 20 kHz when only INJECTION_ROUNDS were allowed.
+// Calibration. The Rs run ramps a DC voltage until the current reaches CAL_CURRENT (fault if it
+// gets to CAL_V_MAX_RATIO * v_bus first), then measures at half that voltage and at the full one;
+// Rs is the slope, which cancels the inverter's voltage error only where that error is constant.
+// Before recording the low level, the DC field pulls the unloaded rotor into alignment; its swing
+// (back-EMF) biased Rs at 20 kHz when only INJECTION_ROUNDS were allowed.
 #define RS_ALIGN_ROUNDS ((uint32_t)(0.3f * PWM_FREQ))
+#define CAL_V_MAX_RATIO 0.25f // Ramp ceiling: fraction of the bus voltage
+#define CAL_RAMP_TIME 1.0f    // s for the ramp to reach that ceiling
+#define CAL_MIN_RATIO 0.2f    // ... where at least this fraction of CAL_CURRENT is still accepted
+// Acceptance: broad physical limits only (the motor is unknown), plus a bounded saliency
+#define CAL_RS_MIN 0.001f
+#define CAL_RS_MAX 50.0f
+#define CAL_L_MIN 0.5e-6f
+#define CAL_L_MAX 0.1f
+#define CAL_LQ_LD_MAX 4.0f // Lq / Ld (and Ld / Lq) above this is a bad measurement
 #define MIN_SALIENCY_H 1e-7f                      // Below this Lq-Ld the motor is treated as non-salient (H)
 #define INJECTION_FREQ 1000.0f                    // Injection frequency for parameter measurement (Hz)
 #define INJECTION_OMEGA (TWO_PI * INJECTION_FREQ) // Injection angular frequency (rad/s)
-#define CAL_PARAM_TOL 4.0f                        // Calibrated Rs/Ld/Lq accepted within RS,LS / tol .. * tol
 
 // Control loops
 #define VD_MAX (V_RATED * ONE_OVER_SQRT3)                                  // Maximum D-axis voltage (V)
@@ -82,6 +91,7 @@
 // Flux-linkage estimate (Flux_Estimate) while the eSMO is in control
 #define FLUX_EST_OMEGA_MIN (2.0f * OMEGA_FORCE) // Only above this |speed| (rad/s el): enough back-EMF
 #define FLUX_EST_ALPHA (TS / 0.5f)              // Low-pass, 0.5 s time constant
+#define FLUX_EST_RANGE 10.0f                    // Accepted psi: FLUX_LINKAGE / range .. * range
 // The eSMO passes |E| with a gain g(wTs) = 0.8944 + 0.357 wTs + 0.73 (wTs)^2 (w = |omega|, wTs =
 // angle per period): 1/sqrt(1 + 1/ESMO_WC_RATIO^2) at low speed (its back-EMF LPF at cutoff
 // ESMO_WC_RATIO * |omega|), rising with wTs. Fitted to the eSMO alone on an ideal motor (sim,
@@ -116,7 +126,7 @@ static void FOC_BLDC_Startup_Update(FOC_t *foc);
 
 // ---------------------------------------------------------------------------
 // HF-injection (HFI) tracker for standstill and low speed, and the eSMO <-> HFI switch
-// (FOC_HFI). A +-HFI_VOLTAGE square wave at PWM_FREQ/4 (sign held 2 periods: + + - -) is
+// (FOC_HFI). A +-hfi_v square wave (sized from Ls: HFI_STEP_CURRENT) at PWM_FREQ/4 (sign held 2 periods: + + - -) is
 // injected along the tracker's own d-axis estimate hfi_theta.
 // Not PWM_FREQ/2: TIM1 takes a new duty mid-period, so a sign flipped every period cancels
 // within each sampling interval (bench 2026-10-27: HF step 0.13 A instead of ~1.2 A).
@@ -140,7 +150,9 @@ static void FOC_BLDC_Startup_Update(FOC_t *foc);
 #define HFI_WARMUP ((uint32_t)(0.02f * PWM_FREQ))  // Tracker running before it may take control (20 ms)
 #define HFI_AGREE_ANGLE 0.2f                       // HFI -> eSMO: max angle difference (rad, ~11 deg)
 #define HFI_AGREE_PERIODS ((uint32_t)(0.01f * PWM_FREQ)) // ... held this long (10 ms)
-#define HFI_ZP_MIN 0.3f                            // Fault: HF response |Zp| below this (A; bench ~2.3, sim ~0.9)
+#define HFI_ZP_MIN 0.3f                            // Fault: HF response |Zp| below this (A; bench ~2.3, sim ~0.9;
+                                                   // the step is held at HFI_STEP_CURRENT, so it does not scale with L)
+#define HFI_V_MAX_RATIO 0.05f                      // Ceiling on hfi_v: fraction of V_RATED
 #define HFI_ERR_MAX 0.35f                          // Fault: |e| above this (rad) ...
 #define HFI_FAULT_PERIODS ((uint32_t)(0.02f * PWM_FREQ)) // ... or |Zp| low, for this long (20 ms) -> coast
 // A tracker locked on the wrong pole (theta + pi) shows a normal |Zp| and e ~ 0, but drives the
@@ -1058,6 +1070,8 @@ static void FOC_Precompute(FOC_t *foc)
 {
     foc->ipark_adv = IPARK_DELAY_COMP * foc->sampling_time;
     foc->harm_k = HARM_KI * foc->sampling_time;
+    // HFI amplitude for a HFI_STEP_CURRENT step per period at the calibrated inductance
+    foc->hfi_v = fminf(HFI_STEP_CURRENT * foc->bldc.Ls / foc->sampling_time, HFI_V_MAX_RATIO * V_RATED);
 
     // MTPA: id = (psi - sqrt(psi^2 + 8 dL^2 Is^2)) / (4 dL), dL = Lq - Ld
     float L_diff = foc->bldc.Lq - foc->bldc.Ld;
@@ -1238,6 +1252,9 @@ void FOC_Start_Measurement(FOC_t *foc, BLDC_Mode_t which, float inj_angle)
     foc->foc_mode = FOC_CALIBRATION;
     foc->motor_mode = which;
     foc->inj_fault = false;
+    // Rs: ramp from zero. Ld/Lq: |Z| >= Rs at 1 kHz, so CAL_CURRENT * Rs cannot exceed CAL_CURRENT
+    foc->inj_ramp = (which == MOTOR_ESTIMATION_RS);
+    foc->inj_v = foc->inj_ramp ? 0.0f : CAL_CURRENT * foc->bldc.Rs;
     foc->inj_start_flag = true; // Last: the ISR starts the run when it sees this
 }
 
@@ -1633,7 +1650,7 @@ FOC_FAST_CODE static void FOC_Harmonic_Comp(FOC_t *foc)
 // Flux linkage from the eSMO's back-EMF while it is in control and locked: |E| / (g * |omega|), g
 // the eSMO's magnitude gain (FLUX_EST_G*). Only where its back-EMF LPF tracks the speed (between
 // the cutoff floor and ceiling, where g holds), above FLUX_EST_OMEGA_MIN, and for values within
-// 0.5..2x of FLUX_LINKAGE (rejects transients). Used by MTPA and the startup plausibility check.
+// FLUX_LINKAGE / FLUX_EST_RANGE .. * FLUX_EST_RANGE (an unknown motor; the lock and LPF reject transients). Used by MTPA and the startup plausibility check.
 FOC_INLINE void Flux_Estimate(FOC_t *foc)
 {
     const float w = fabsf(foc->smo.omega_est);
@@ -1645,7 +1662,7 @@ FOC_INLINE void Flux_Estimate(FOC_t *foc)
     const float wts = w * foc->sampling_time;
     const float g = FLUX_EST_G0 + wts * (FLUX_EST_G1 + FLUX_EST_G2 * wts);
     const float psi = foc->smo.emf_magnitude / (g * w);
-    if (psi > 0.5f * FLUX_LINKAGE && psi < 2.0f * FLUX_LINKAGE)
+    if (psi > FLUX_LINKAGE / FLUX_EST_RANGE && psi < FLUX_LINKAGE * FLUX_EST_RANGE)
     {
         foc->bldc.flux += FLUX_EST_ALPHA * (psi - foc->bldc.flux);
     }
@@ -1709,7 +1726,7 @@ static inline float Wrap_Pm_Pi(float a)
 
 #if FOC_HFI
 // ---------------------------------------------------------------------------
-// HFI tracker (see HFI_VOLTAGE in foc_lib.h). Started at the eSMO's angle and speed while running,
+// HFI tracker (see HFI_STEP_CURRENT in foc_lib.h). Started at the eSMO's angle and speed while running,
 // at 0 from standstill (MOTOR_STARTUP_HFI).
 FOC_FAST_CODE static void HFI_Start(FOC_t *foc, float theta, float omega)
 {
@@ -1811,7 +1828,7 @@ FOC_FAST_CODE static void HFI_Inject(FOC_t *foc)
     }
     float s, c;
     Fast_Sin_Cos(delta, &s, &c);
-    const float v = (foc->hfi_idx < 2u) ? HFI_VOLTAGE : -HFI_VOLTAGE;
+    const float v = (foc->hfi_idx < 2u) ? foc->hfi_v : -foc->hfi_v;
     foc->v_d += v * c;
     foc->v_q += v * s;
 
@@ -2310,9 +2327,9 @@ void FOC_BLDC_Parameter_Calculation_Resistance(FOC_t *foc)
     }
 
     float rs = fabsf((mean_vd - low_vd) / delta_id);
-    if (rs < RS / CAL_PARAM_TOL || rs > RS * CAL_PARAM_TOL)
+    if (rs < CAL_RS_MIN || rs > CAL_RS_MAX)
     {
-        printf("\r\nRs %f implausible (default %f): keeping %f\r\n", rs, RS, foc->bldc.Rs);
+        printf("\r\nRs %f implausible: keeping %f\r\n", rs, foc->bldc.Rs);
         return;
     }
     foc->bldc.Rs = rs;
@@ -2388,17 +2405,18 @@ void FOC_BLDC_Parameter_Calculation_Inductance(FOC_t *foc)
     // inverted; opposite signs = beta axis flipped (phase V/W swapped between ADC and PWM)
     printf("  signed Ld_est = %e, Lq_est = %e\r\n", Ld_est, Lq_est);
 
-    // Reject implausible results (e.g. no bus voltage: ~35x LS was accepted once and set the
-    // current-loop gains from it)
-    const float l_min = LS / CAL_PARAM_TOL, l_max = LS * CAL_PARAM_TOL;
-    if (fabsf(Ld_est) < l_min || fabsf(Ld_est) > l_max || fabsf(Lq_est) < l_min || fabsf(Lq_est) > l_max)
+    // Reject implausible results (no bus voltage once gave ~35x the real L; the Rs ramp now faults
+    // without a bus, so this is the second line)
+    const float ld = fabsf(Ld_est), lq = fabsf(Lq_est);
+    if (ld < CAL_L_MIN || ld > CAL_L_MAX || lq < CAL_L_MIN || lq > CAL_L_MAX ||
+        lq > CAL_LQ_LD_MAX * ld || ld > CAL_LQ_LD_MAX * lq)
     {
-        printf("\r\nLd/Lq implausible (default LS %e): keeping Ld %e, Lq %e\r\n", LS, foc->bldc.Ld, foc->bldc.Lq);
+        printf("\r\nLd/Lq implausible: keeping Ld %e, Lq %e\r\n", foc->bldc.Ld, foc->bldc.Lq);
         return;
     }
 
-    foc->bldc.Ld = fabsf(Ld_est);
-    foc->bldc.Lq = fabsf(Lq_est);
+    foc->bldc.Ld = ld;
+    foc->bldc.Lq = lq;
     foc->bldc.Ls = (foc->bldc.Ld + foc->bldc.Lq) * 0.5f;
 }
 
@@ -2472,6 +2490,34 @@ FOC_FAST_CODE static void FOC_BLDC_Parameter_Measurement_Update(FOC_t *foc)
         const uint32_t rs_low_end = RS_ALIGN_ROUNDS + INJECTION_ROUNDS;
         const uint32_t rounds_total = rs_run ? rs_low_end + 2u * INJECTION_ROUNDS : 2u * INJECTION_ROUNDS;
 
+        if (rs_run && foc->inj_ramp)
+        {
+            // Ramp until the current reaches CAL_CURRENT; inj_v keeps the level reached. A
+            // high-resistance motor may stop at the ceiling with at least CAL_MIN_RATIO of it.
+            // Without a bus, or with an open winding, the ceiling comes first: fault.
+            Clarke_Park_Transform(foc->i_a, foc->i_b, foc->inj_angle, &(foc->i_d), &(foc->i_q));
+            const float v_max = CAL_V_MAX_RATIO * foc->v_bus;
+            const float i_abs = fabsf(foc->i_d);
+            if (i_abs >= CAL_CURRENT || (foc->inj_v > v_max && i_abs >= CAL_MIN_RATIO * CAL_CURRENT))
+            {
+                foc->inj_ramp = false;
+            }
+            else if (foc->v_bus < V_BUS_MIN || foc->inj_v > v_max)
+            {
+                foc->inj_start_flag = false;
+                foc->inj_fault = true;
+                foc->motor_mode = MOTOR_IDLE;
+                foc->inj_v = 0.0f;
+            }
+            else
+            {
+                foc->inj_v += v_max * foc->sampling_time / CAL_RAMP_TIME;
+            }
+            foc->v_d = foc->inj_v;
+            foc->v_q = 0.0f;
+            return;
+        }
+
         if (rs_run)
         {
             if (foc->inj_n == 0)
@@ -2479,13 +2525,13 @@ FOC_FAST_CODE static void FOC_BLDC_Parameter_Measurement_Update(FOC_t *foc)
                 foc->rs_low_vd_sum = 0.0f;
                 foc->rs_low_id_sum = 0.0f;
             }
-            foc->v_d = (foc->inj_n < rs_low_end) ? INJECTION_VOLTAGE_RS_LOW : INJECTION_VOLTAGE;
+            foc->v_d = (foc->inj_n < rs_low_end) ? 0.5f * foc->inj_v : foc->inj_v;
             foc->v_q = 0.0f;
         }
         else
         {
             float angle = INJECTION_OMEGA * foc->inj_n * foc->sampling_time;
-            float v_inj = INJECTION_VOLTAGE * Fast_Sin(angle);
+            float v_inj = foc->inj_v * Fast_Sin(angle);
             if (foc->motor_mode == MOTOR_ESTIMATION_LD)
             {
                 foc->v_d = v_inj;

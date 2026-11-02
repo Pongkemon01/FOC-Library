@@ -59,7 +59,9 @@ int main(int argc, char **argv)
 {
     const double Tc = atof(argv[1]), kfan = atof(argv[2]), lq_ratio = atof(argv[3]);
     const double t_coast = atof(argv[4]), t_end = atof(argv[5]);
-    const double Ts = TS, Rs = RS, Ld = LS, Lq = LS * lq_ratio;
+    /* Plant: the library defaults, or env PRS / PLS (a motor unlike foc_lib.h's RS / LS) */
+    const double Ts = TS, Rs = getenv("PRS") ? atof(getenv("PRS")) : RS, Ld = getenv("PLS") ? atof(getenv("PLS")) : LS;
+    const double Lq = Ld * lq_ratio;
     const double psi = (argc > 7) ? atof(argv[7]) : FLUX_LINKAGE;   /* plant (real motor) flux */
     const double p = (argc > 8) ? atof(argv[8]) : POLE_PAIRS;       /* plant (real motor) pole pairs */
     const double J = getenv("J") ? atof(getenv("J")) : 1.4e-5, B = 1e-6; double vbus = 12.0;
@@ -71,6 +73,8 @@ int main(int argc, char **argv)
     memset(&foc, 0, sizeof foc);
     FOC_Init(&foc, PWM_RES);
     foc.bldc.Ld = (float)Ld; foc.bldc.Lq = (float)Lq;
+    /* With PRS / PLS: as self-commissioning would leave it (exact Rs, Ls) */
+    if (getenv("PRS") || getenv("PLS")) { foc.bldc.Rs = (float)Rs; foc.bldc.Ls = (float)(0.5 * (Ld + Lq)); }
     /* controller parameter mismatch: LD_EST / RS_EST are what calibration "measured" */
     if (getenv("LD_EST")) foc.bldc.Ld = foc.bldc.Lq = (float)atof(getenv("LD_EST"));
     if (getenv("RS_EST")) foc.bldc.Rs = (float)atof(getenv("RS_EST"));

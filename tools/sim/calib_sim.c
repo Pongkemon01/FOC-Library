@@ -6,14 +6,16 @@
 #include "foc_lib.c" /* white-box: the sims reach internal functions and constants */
 int main(int argc, char **argv)
 {
-    const double Rs = RS, Ld = LS, Lq = LS * atof(argv[1]), vbus = 12.0, Ts = TS; const int SUB = 40; const double h = Ts / SUB;
+    /* Plant: the library defaults, or env PRS / PLS (test a motor unlike foc_lib.h's RS / LS) */
+    const double Rs = getenv("PRS") ? atof(getenv("PRS")) : RS, Ld = getenv("PLS") ? atof(getenv("PLS")) : LS;
+    const double Lq = Ld * atof(argv[1]), vbus = 12.0, Ts = TS; const int SUB = 40; const double h = Ts / SUB;
     const double A_PER_LSB = ADC_2_VOLT * V_2_CURRENT; srand(5);
     static FOC_t foc; memset(&foc, 0, sizeof foc); FOC_Init(&foc, PWM_RES);
     double id = 0, iq = 0; uint32_t pa = PWM_RES / 2, pb = PWM_RES / 2, pc = PWM_RES / 2;
-    int modes[3] = {MOTOR_ESTIMATION_RS, MOTOR_ESTIMATION_LD, MOTOR_ESTIMATION_LQ};
+    double rs_v = 0; int modes[3] = {MOTOR_ESTIMATION_RS, MOTOR_ESTIMATION_LD, MOTOR_ESTIMATION_LQ};
     for (int m = 0; m < 3; m++) {
-        foc.foc_mode = FOC_CALIBRATION; foc.motor_mode = modes[m]; foc.inj_n = 0; foc.inj_start_flag = true;
-        for (int k = 0; k < 20000 && foc.inj_start_flag; k++) {
+        FOC_Start_Measurement(&foc, modes[m], 0.0f);
+        for (int k = 0; k < 100000 && foc.inj_start_flag; k++) {
             /* rotor blocked at theta = 0: alpha = d, beta = q */
             double ia = id, ib = -0.5 * id + 0.8660254037844386 * iq;
             int aa = (int)lround(ADC_OFFSET + ia / A_PER_LSB + (rand() % 5 - 2)), ab = (int)lround(ADC_OFFSET + ib / A_PER_LSB + (rand() % 5 - 2));
@@ -29,11 +31,11 @@ int main(int argc, char **argv)
             for (int j = 0; j < SUB; j++) { id += h * (ud - Rs * id) / Ld; iq += h * (uq - Rs * iq) / Lq; }
             pa = foc.pwm_a; pb = foc.pwm_b; pc = foc.pwm_c;
         }
-        if (modes[m] == MOTOR_ESTIMATION_RS) FOC_BLDC_Parameter_Calculation_Resistance(&foc);
+        if (modes[m] == MOTOR_ESTIMATION_RS) { FOC_BLDC_Parameter_Calculation_Resistance(&foc); rs_v = foc.inj_v; }
         id = iq = 0; /* let the winding settle between injections */
     }
-    FOC_BLDC_Parameter_Calculation_Inductance(&foc);
+    FOC_BLDC_Parameter_Calculation_Inductance(&foc); FOC_Recalc_Params(&foc);
     fprintf(stderr, "Rs = %.4f ohm (true %.4f), Ld = %.2f uH (true %.2f), Lq = %.2f uH (true %.2f), fault %d\n",
-            foc.bldc.Rs, Rs, foc.bldc.Ld * 1e6, Ld * 1e6, foc.bldc.Lq * 1e6, Lq * 1e6, foc.inj_fault);
+            foc.bldc.Rs, Rs, foc.bldc.Ld * 1e6, Ld * 1e6, foc.bldc.Lq * 1e6, Lq * 1e6, foc.inj_fault, rs_v, foc.hfi_v);
     return 0;
 }

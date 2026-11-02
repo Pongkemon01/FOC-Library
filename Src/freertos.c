@@ -263,11 +263,13 @@ static void Calibrate(void)
 {
     printf("Measuring Rs...\r\n");
     FOC_Start_Measurement(&foc, MOTOR_ESTIMATION_RS, 0.0f);
+    // The library ramps the voltage until the current reaches CAL_CURRENT: no motor constant needed
     if (Wait_Measurement())
         FOC_BLDC_Parameter_Calculation_Resistance(&foc);
     else
-        printf("  !! aborted on over-current (I > %f A): Rs not updated\r\n", (double)INJECTION_MAX_CURRENT);
-    printf("  Rs = %f ohm\r\n", foc.bldc.Rs);
+        printf("  !! aborted (over %f A, or %f A not reached: no bus / open winding): Rs not updated\r\n",
+               (double)INJECTION_MAX_CURRENT, (double)CAL_CURRENT);
+    printf("  Rs = %f ohm (ramp reached %f V)\r\n", foc.bldc.Rs, foc.inj_v);
 
     // Current-sign check: the Rs run is DC on phase A (v_d > 0 at theta = 0), so a correct sense
     // chain gives i_a > 0 and i_b ~ -i_a / 2. The calibration itself cannot see a wrong
@@ -300,7 +302,8 @@ static void Calibrate(void)
         printf("  !! aborted on over-current: Ld/Lq not updated\r\n");
     printf("  Ld = %e H, Lq = %e H\r\n", foc.bldc.Ld, foc.bldc.Lq);
 
-    FOC_Recalc_Params(&foc); // Apply the measured values to the current loops and the observer
+    FOC_Recalc_Params(&foc); // Apply the measured values to the current loops, the observer and HFI
+    printf("  HFI amplitude %f V\r\n", foc.hfi_v);
 }
 
 #if RUN_SALIENCY_SWEEP
@@ -312,7 +315,7 @@ static void Saliency_Sweep(void)
 {
     static float L[SWEEP_POINTS], xr[SWEEP_POINTS], xi[SWEEP_POINTS];
     printf("Saliency sweep (%d points, 1 kHz, %f V):\r\n  deg  L_axis(nH)  cross_re(x1e4)  cross_im(x1e4)\r\n",
-           SWEEP_POINTS, (double)INJECTION_VOLTAGE);
+           SWEEP_POINTS, (double)(CAL_CURRENT * foc.bldc.Rs));
     for (int k = 0; k < SWEEP_POINTS; k++)
     {
         FOC_Start_Measurement(&foc, MOTOR_ESTIMATION_LD, (float)k * (APP_TWO_PI / SWEEP_POINTS));

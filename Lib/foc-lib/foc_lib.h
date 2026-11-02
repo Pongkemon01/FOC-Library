@@ -128,8 +128,9 @@
 #ifndef FOC_HFI
 #define FOC_HFI 1 // 0 for a motor without enough saliency (Lq != Ld): Align -> I-f start, eSMO only
 #endif
-#ifndef HFI_VOLTAGE
-#define HFI_VOLTAGE 0.075f // Square-wave amplitude (V) at PWM_FREQ / 4; ~+-0.8 A ripple at 6.4 uH
+#ifndef HFI_STEP_CURRENT
+#define HFI_STEP_CURRENT 0.54f // Current step per period of the PWM_FREQ / 4 square wave (A). Its
+                               // amplitude is this * Ls * PWM_FREQ from the calibrated Ls: 0.075 V at 7 uH
 #endif
 #ifndef HFI_OMEGA_LOW
 #define HFI_OMEGA_LOW 300.0f // eSMO -> HFI below this |speed| (rad/s el; 409 rpm at 7 pole pairs).
@@ -139,7 +140,7 @@
 #define HFI_K 0.30f // HFI saliency signal |Zq| / |Zp| at 2e = 90 deg (bench 0.28-0.31; sims 0.14)
 #endif
 #ifndef HFI_POL_CURRENT
-#define HFI_POL_CURRENT 6.0f // N/S polarity pulses at standstill (A, d-axis: no torque)
+#define HFI_POL_CURRENT (0.4f * I_RATED) // N/S polarity pulses at standstill (A, d-axis: no torque)
 #endif
 #ifndef HFI_POL_MARGIN
 #define HFI_POL_MARGIN 0.02f // Minimum relative HF-response contrast to trust the polarity
@@ -207,12 +208,12 @@
 #define HARM_KI 20.0f // Its integrator gain (V per A per s)
 #endif
 
-// Rs / Ld / Lq calibration (injected at standstill; current ~ voltage / Rs)
-#ifndef INJECTION_VOLTAGE
-#define INJECTION_VOLTAGE 0.14f // Rs high level and Ld/Lq 1 kHz amplitude (V): ~5.3 A DC, ~2.8 A AC
-#endif
-#ifndef INJECTION_VOLTAGE_RS_LOW
-#define INJECTION_VOLTAGE_RS_LOW 0.08f // Rs low level (V); both levels well above the dead-time knee
+// Rs / Ld / Lq calibration (self-commissioning at standstill; no motor constant needed). The Rs run
+// ramps a DC voltage up until the current reaches CAL_CURRENT, then measures at half that voltage
+// and at the full one. The Ld/Lq runs inject CAL_CURRENT * Rs at 1 kHz (|Z| >= Rs: at most
+// CAL_CURRENT). Keep CAL_CURRENT well above the dead-time knee (low level ~ CAL_CURRENT / 2).
+#ifndef CAL_CURRENT
+#define CAL_CURRENT (0.35f * I_RATED) // A: 5.25 A here (bench: ~0.14 V, low level ~2.3 A, AC ~2.4 A)
 #endif
 #ifndef INJECTION_MAX_CURRENT
 #define INJECTION_MAX_CURRENT I_RATED // Abort a calibration above this current (A)
@@ -400,9 +401,11 @@ typedef struct
     // Temporary variables for BLDC calibration
     uint32_t inj_n; // Injection round counter
     bool inj_start_flag;
-    bool inj_fault; // Set when injection aborted on over-current
+    bool inj_fault; // Set when injection aborted: over-current, or CAL_CURRENT not reached (no bus, open winding)
+    bool inj_ramp;  // Rs run: still ramping the DC voltage up to CAL_CURRENT
+    float inj_v;    // Rs run: DC voltage reached at CAL_CURRENT (V); Ld/Lq runs: 1 kHz amplitude (V)
     float inj_angle; // Injection frame angle (rad el, 0..2pi): 0 for Rs/Ld/Lq, swept by the saliency test
-    float rs_low_vd_sum, rs_low_id_sum; // Two-point Rs: sums recorded at INJECTION_VOLTAGE_RS_LOW
+    float rs_low_vd_sum, rs_low_id_sum; // Two-point Rs: sums recorded at the low level (inj_v / 2)
     float i_a_buff[INJECTION_ROUNDS], i_b_buff[INJECTION_ROUNDS]; // Phase currents (current-sign diagnostic)
     float vd_inj_buff[INJECTION_ROUNDS]; // Buffer for injected voltages
     float vq_inj_buff[INJECTION_ROUNDS];
@@ -418,6 +421,7 @@ typedef struct
     float hfi_zp_pos, hfi_zp_neg;   // Mean |Zp| (A) during the +/- pulses, diagnostic
     float hfi_probe;                // Injection axis offset (rad): HFI_PROBE_ANGLE during the probe (PLL frozen), else 0
     float hfi_probe_e;              // Mean tracker error during the probe (rad), diagnostic
+    float hfi_v;                    // Square-wave amplitude (V), sized from bldc.Ls (HFI_STEP_CURRENT)
     bool hfi_on;                    // Tracker running (injecting)
     bool hfi_control;               // true: the transforms use the HFI angle; false: the eSMO's
     bool hfi_fault;                 // Latched: lost the HF response or the track (coasted)
