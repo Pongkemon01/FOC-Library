@@ -52,6 +52,12 @@ history (marked superseded where they no longer apply).
   T200 bench, 3 calibration-only runs: Lq 58.4 / 56.8 / 80.1 uH (before 62-212), Ld 47.5 / 52.2 /
   45.7 uH; the saliency-sweep fit agrees (Lq ~58.3 / 56.5 / 66.1 uH). Hardware-verified: spread
   much smaller, one run still high. Rs in the same runs 0.157 / 0.226 / 0.167 Ohm (separate).
+- Rs spread (0.155-0.226 Ohm) was a bad phase connection, not the algorithm: in the Rs run
+  (voltage along phase A) i_b/i_a should be -0.5 but read -0.51 to -0.96 on the T200 (phase C
+  carrying 4-49 % of i_a; SK3 steady -0.53). After the user reseated the connectors, 3
+  calibration-only runs: Rs 0.1389 / 0.1397 / 0.1386 Ohm, Ld 43.7 / 43.8 / 44.0 uH, Lq 48.4 /
+  49.1 / 49.7 uH, i_b/i_a -0.56 / -0.52 / -0.42 (ramp 0.73 V, was 0.81-1.12 V). Hardware-verified.
+  The T200 figures above this line were taken with the bad connection.
 - Bench oddity: the saliency sweep was sane in the bypass runs (L0 57.6 uH, A2 8.9 uH, axis
   163 deg) but nonsense in the first T200 run; the Lq spread suggests the rotor moves.
 
