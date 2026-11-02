@@ -472,6 +472,7 @@ static void Speed_Test(void)
     printf("t_ms mode w_force w_ref w_est emf_mV lock cnt id_mA iq_mA ia_mA ib_mA vd_mV vq_mV vbus_mV brk moe "
            "isr_cyc irq_cyc on ctl smo_hfi w_hfi zp err flt\r\n");
     BLDC_Mode_t last_mode = foc.motor_mode;
+    bool stopped = false;
     for (int k = 0; k < TEST_ROWS; k++)
     {
         const uint32_t t_ms = osKernelGetTickCount() - t0;
@@ -486,6 +487,21 @@ static void Speed_Test(void)
                    "(1 kept, -1 flipped, 0 -> Align/I-f)\r\n",
                    (int)(foc.hfi_probe_e * 1000.0f), (int)(foc.hfi_zp_pos * 1000.0f), (int)(foc.hfi_zp_neg * 1000.0f),
                    (int)foc.hfi_pol);
+        if (foc.motor_mode != MOTOR_STARTUP_HFI && last_mode == MOTOR_STARTUP_HFI)
+            printf("*** Min speed %d rad/s el (0: HFI holds any speed)\r\n", (int)FOC_Min_Speed(&foc));
+        // Below FOC_Min_Speed the library stops the motor; start again once the reference is back up
+        if (foc.foc_mode == FOC_IDLE && !stopped)
+        {
+            printf("*** Stopped: speed_ref %d below min speed %d rad/s el\r\n", (int)foc.speed_ref,
+                   (int)FOC_Min_Speed(&foc));
+            stopped = true;
+        }
+        else if (stopped && foc.speed_ref >= FOC_Min_Speed(&foc))
+        {
+            printf("*** Restart at speed_ref %d\r\n", (int)foc.speed_ref);
+            stopped = false;
+            FOC_Start(&foc, FOC_SPEED_CONTROL);
+        }
         last_mode = foc.motor_mode;
 
         Log_Row(t_ms);

@@ -453,7 +453,6 @@ typedef struct
     float startup_omega;   // Open-loop (forced) speed for startup (electrical rad/s)
     float angle_offset;    // Transition: forced minus observer angle, decays to 0
     uint32_t bemf_counter; // Counter for back-EMF detection during startup
-    bool if_low;           // Speed mode, no HFI: I-f below the eSMO's speed range (MOTOR_STARTUP_RAMP)
 } FOC_t;
 
 // ============================================================================
@@ -468,6 +467,7 @@ extern "C"
     void FOC_Init(FOC_t *foc, uint32_t pwm_res);              // pwm_res = PWM period count (100 % duty)
     bool FOC_Set_Direction(FOC_t *foc, BLDC_Direction_t dir); // Bridge off only; false otherwise
     void FOC_Set_Current_Limit(FOC_t *foc, float amps);       // Default I_RATED
+    float FOC_Min_Speed(const FOC_t *foc);                    // Speed mode: a lower speed_ref stops the motor
 
     // Run and stop. Targets: foc->speed_ref (speed mode) or foc->is_ref (torque mode), relative
     // to the direction; the drive is motoring only (a negative speed_ref means 0).

@@ -32,19 +32,12 @@
 #define KP_PLL 630.0f                 // PLL proportional gain
 #define KI_PLL 100000.0f              // PLL integral gain
 #define MIN_BEMF_AMPLITUDE 0.1f       // Minimum back-EMF amplitude for reliable estimation (V)
-
-// Low-speed I-f (speed mode without HFI: a motor too weakly salient, or FOC_HFI 0). Below the
-// speed where the eSMO can lock (back-EMF MIN_BEMF_AMPLITUDE), MOTOR_RUNNING hands over to the
-// I-f ramp state: the forced angle follows the speed reference with iq = I_STARTUP, down to a
-// standstill hold. Above IF_LOW_EXIT x that speed it accelerates to OMEGA_FORCE and re-locks
-// through the normal startup path. Limits in multiples of MIN_BEMF_AMPLITUDE / flux.
-#ifndef IF_LOW_DAMP
-#define IF_LOW_DAMP 0.005f // s: control angle pulled back by this x (eSMO speed - forced speed)
+// Without HFI (start probe found no saliency, or FOC_HFI 0) the eSMO is the only angle source:
+// speed mode stops the motor when speed_ref is below this x the speed where the back-EMF is
+// MIN_BEMF_AMPLITUDE (FOC_Min_Speed; bench T200: estimate 50-82 at 75 rad/s el, steady at 150)
+#ifndef ESMO_MIN_SPEED_RATIO
+#define ESMO_MIN_SPEED_RATIO 1.5f
 #endif
-#define IF_LOW_ENTER 1.0f   // Enter when the speed reference ramp falls below this
-#define IF_LOW_EXIT 2.0f    // Leave (accelerate to OMEGA_FORCE) above this
-#define IF_LOW_DECEL 200.0f // Forced deceleration (rad/s^2 el): slower than the rotor coasts, so
-                            // the forced angle does not brake it (the drive is motoring only)
 #define ESMO_K_SLIDE_MIN 1.0f         // Minimum sliding gain (V)
 #define ESMO_K_SLIDE_MARGIN 1.5f      // Sliding gain = margin * |E_hat| (must be > 1)
 #define ESMO_BOUNDARY_GAIN 0.0f       // lambda in (0, 1+F). 0 = auto (lambda = F, deadbeat current error)
@@ -138,7 +131,6 @@ static void SMO_BLDC_Specs_Update(SMO_t *smo, BLDC_Specs_t *bldc, float sampling
 static bool SMO_Update(SMO_t *smo, float v_bus, float v_alpha, float v_beta, float i_alpha_meas, float i_beta_meas);
 static void FOC_MTPA(FOC_t *foc, float Is, float *Id_ref, float *Iq_ref);
 static void FOC_BLDC_Startup_Update(FOC_t *foc);
-static inline bool IF_Low_Allowed(const FOC_t *foc);
 
 // ---------------------------------------------------------------------------
 // HF-injection (HFI) tracker for standstill and low speed, and the eSMO <-> HFI switch
@@ -1251,6 +1243,29 @@ void FOC_Stop(FOC_t *foc)
     }
 }
 
+// Without HFI the eSMO is the only angle source (HFI_PROBE decides after the first start)
+FOC_FAST_CODE static bool Esmo_Only(const FOC_t *foc)
+{
+#if FOC_HFI
+    return !foc->hfi_salient;
+#else
+    (void)foc;
+    return true;
+#endif
+}
+
+// Lowest speed reference (rad/s el) the drive holds in speed mode; a lower one stops the motor.
+// 0 while HFI can hold any speed. The HFI start's saliency probe sets this, so read it after the
+// first start; it follows the measured flux linkage.
+float FOC_Min_Speed(const FOC_t *foc)
+{
+    if (foc == NULL || !Esmo_Only(foc) || foc->bldc.flux <= 0.0f)
+    {
+        return 0.0f;
+    }
+    return ESMO_MIN_SPEED_RATIO * MIN_BEMF_AMPLITUDE / foc->bldc.flux;
+}
+
 // Current limit (A) for the current references and the speed loop's output
 void FOC_Set_Current_Limit(FOC_t *foc, float amps)
 {
@@ -1393,6 +1408,15 @@ FOC_FAST_CODE void FOC_Update(FOC_t *foc)
 
     case FOC_TORQUE_CONTROL:
     case FOC_SPEED_CONTROL:
+        if (foc->foc_mode == FOC_SPEED_CONTROL && Esmo_Only(foc) &&
+            foc->speed_ref * foc->bldc.flux < ESMO_MIN_SPEED_RATIO * MIN_BEMF_AMPLITUDE)
+        {
+            // Below FOC_Min_Speed with no HFI: stop (the eSMO cannot hold it)
+            FOC_Coast(foc);
+            foc->foc_mode = FOC_IDLE;
+            foc->motor_mode = MOTOR_IDLE;
+            break;
+        }
         switch (foc->motor_mode)
         {
         case MOTOR_IDLE:
@@ -1418,21 +1442,6 @@ FOC_FAST_CODE void FOC_Update(FOC_t *foc)
             else
             {
                 FOC_Speed_Control(foc);
-                if (IF_Low_Allowed(foc) && foc->speed_ref_ramp * foc->bldc.flux < IF_LOW_ENTER * MIN_BEMF_AMPLITUDE)
-                {
-                    // Below the eSMO's range: continue from the present angle, speed and current
-                    foc->startup_theta = foc->theta;
-                    foc->startup_omega = foc->omega;
-                    foc->angle_offset = 0.0f;
-                    foc->bemf_counter = 0;
-                    foc->startup_timer = 0.0f;
-                    foc->if_low = true;
-                    foc->hfi_on = false;
-                    Harm_Reset(foc);
-                    foc->motor_mode = MOTOR_STARTUP_RAMP;
-                    FOC_BLDC_Startup_Update(foc);
-                    break;
-                }
             }
 #if FOC_HFI
             FOC_Current_Loop_HFI(foc); // eSMO, or HFI at low speed
@@ -2030,16 +2039,6 @@ FOC_FAST_CODE static void FOC_Speed_Control(FOC_t *foc)
     foc->id_ref = 0.0f;
 }
 
-// Low-speed I-f applies in speed mode when HFI cannot hold low speed (see IF_LOW_ENTER)
-FOC_INLINE bool IF_Low_Allowed(const FOC_t *foc)
-{
-#if FOC_HFI
-    return foc->foc_mode == FOC_SPEED_CONTROL && !foc->hfi_salient;
-#else
-    return foc->foc_mode == FOC_SPEED_CONTROL;
-#endif
-}
-
 // Startup: Align -> I-f ramp -> Transition -> Run.
 //
 // All stages are current-controlled: the d/q current PI loops run from the
@@ -2080,7 +2079,6 @@ FOC_FAST_CODE static void FOC_BLDC_Startup_Update(FOC_t *foc)
         foc->startup_omega = 0.0f;
         foc->angle_offset = 0.0f;
         foc->bemf_counter = 0;
-        foc->if_low = false;
         foc->hfi_on = false;
         foc->hfi_control = false;
         foc->theta = 0.0f;
@@ -2256,52 +2254,19 @@ FOC_FAST_CODE static void FOC_BLDC_Startup_Update(FOC_t *foc)
         {
             foc->startup_timer = 0.0f;
             foc->bemf_counter = 0;
-            foc->speed_ref_ramp = 0.0f;
-            foc->if_low = IF_Low_Allowed(foc) &&
-                          foc->speed_ref * foc->bldc.flux < IF_LOW_EXIT * MIN_BEMF_AMPLITUDE;
             foc->motor_mode = MOTOR_STARTUP_RAMP;
         }
         break;
 
     case MOTOR_STARTUP_RAMP:
     {
-        // Forced angle: accelerate up to OMEGA_FORCE, then hold that speed. Low-speed I-f:
-        // follow the speed reference instead, until it rises above the eSMO's range.
-        if (foc->if_low)
-        {
-            const float target = (foc->speed_ref > 0.0f) ? foc->speed_ref : 0.0f;
-            foc->speed_ref_ramp = Slew_To(foc->speed_ref_ramp, target, SPEED_REF_SLEW * ts);
-            if (foc->speed_ref_ramp * foc->bldc.flux > IF_LOW_EXIT * MIN_BEMF_AMPLITUDE)
-            {
-                foc->if_low = false;
-            }
-        }
-        if (foc->if_low)
-        {
-            const float w = dir * foc->startup_omega;
-            const float w_ref = (foc->speed_ref_ramp < OMEGA_FORCE) ? foc->speed_ref_ramp : OMEGA_FORCE;
-            const float w_new = (w < w_ref) ? fminf(w + STARTUP_ACCEL * ts, w_ref)
-                                            : fmaxf(w - IF_LOW_DECEL * ts, w_ref);
-            foc->startup_omega = dir * w_new;
-        }
-        else
-        {
-            foc->startup_omega = CONSTRAIN(foc->startup_omega + dir * STARTUP_ACCEL * ts,
-                                           -OMEGA_FORCE, OMEGA_FORCE);
-        }
+        // Forced angle: accelerate up to OMEGA_FORCE, then hold that speed
+        foc->startup_omega = CONSTRAIN(foc->startup_omega + dir * STARTUP_ACCEL * ts,
+                                       -OMEGA_FORCE, OMEGA_FORCE);
         foc->startup_theta += foc->startup_omega * ts;
         Normalize_Angle(&(foc->startup_theta));
         foc->theta = foc->startup_theta;
         foc->omega = foc->startup_omega;
-        if (foc->if_low)
-        {
-            // The eSMO speed is noise near standstill: fade the damping out below a quarter of the
-            // eSMO's lock speed
-            const float w_min = 0.25f * IF_LOW_ENTER * MIN_BEMF_AMPLITUDE / foc->bldc.flux;
-            const float fade = fminf(fabsf(foc->startup_omega) / w_min, 1.0f);
-            const float c = CONSTRAIN(fade * IF_LOW_DAMP * (foc->smo.omega_est - foc->startup_omega), -0.5f, 0.5f);
-            foc->theta = Wrap_Once(foc->startup_theta - c);
-        }
 
         // Turn the current vector from the alignment d-axis onto the q-axis
         foc->id_ref = Slew_To(foc->id_ref, 0.0f, i_step);
@@ -2325,7 +2290,7 @@ FOC_FAST_CODE static void FOC_BLDC_Startup_Update(FOC_t *foc)
                          EMF_PLAUSIBLE_RATIO * fabsf(foc->startup_omega) * foc->bldc.flux;
         foc->bemf_counter = (locked && agree && plausible) ? foc->bemf_counter + 1 : 0;
 
-        if (!foc->if_low && fabsf(foc->startup_omega) >= OMEGA_FORCE)
+        if (fabsf(foc->startup_omega) >= OMEGA_FORCE)
         {
             foc->startup_timer += ts;
             if (foc->bemf_counter >= BEMF_LOCK_COUNT)
