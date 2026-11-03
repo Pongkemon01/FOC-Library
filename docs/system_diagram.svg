@@ -1,0 +1,286 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1080" font-family="Segoe UI, Arial, sans-serif" font-size="13">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#333"/>
+    </marker>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#c62828"/>
+    </marker>
+    <style>
+      .t{font-weight:700;font-size:15px}
+      .h{font-weight:700;font-size:20px}
+      .s{font-size:11.5px;fill:#333}
+      .ln{stroke:#333;stroke-width:1.6;fill:none;marker-end:url(#a)}
+      .lr{stroke:#c62828;stroke-width:1.6;fill:none;stroke-dasharray:6 4;marker-end:url(#ar)}
+      .lp{stroke:#6a1b9a;stroke-width:1.6;fill:none;stroke-dasharray:3 3;marker-end:url(#a)}
+    </style>
+  </defs>
+  <rect width="1600" height="1080" fill="#fafafa"/>
+  <text x="800" y="34" text-anchor="middle" class="h">stm32-foc: sensorless FOC on Nucleo-F303RE + X-NUCLEO-IHM08M1</text>
+  <text x="800" y="54" text-anchor="middle" class="s">PWM / control ISR at PWM_FREQ = 20 kHz (3600-cycle budget, ~2300 used) · speed loop 1 kHz · units: electrical rad, rad/s</text>
+
+  <!-- ================= HARDWARE ================= -->
+  <rect x="20" y="75" width="1560" height="190" rx="10" fill="#e3f2fd" stroke="#1565c0" stroke-width="2"/>
+  <text x="34" y="97" class="t" fill="#1565c0">HARDWARE</text>
+
+  <rect x="40" y="110" width="170" height="135" rx="8" fill="#fff" stroke="#1565c0"/>
+  <text x="125" y="132" text-anchor="middle" class="t">DC supply</text>
+  <text x="125" y="152" text-anchor="middle" class="s">12 V, 5 A limit (bench)</text>
+  <text x="125" y="170" text-anchor="middle" class="s">cannot sink current →</text>
+  <text x="125" y="186" text-anchor="middle" class="s">drive is motoring only</text>
+  <text x="125" y="206" text-anchor="middle" class="s">V_BUS_MIN 8 V / V_BUS_MAX</text>
+
+  <rect x="260" y="110" width="430" height="135" rx="8" fill="#fff" stroke="#1565c0"/>
+  <text x="475" y="132" text-anchor="middle" class="t">X-NUCLEO-IHM08M1 power board</text>
+  <text x="275" y="155" class="s">• 3-phase MOSFET bridge, L6398 gate drivers (LIN active-low)</text>
+  <text x="275" y="173" class="s">• 3 low-side shunts (R_SHUNT) + op-amps → phase currents</text>
+  <text x="275" y="191" class="s">  CURRENT_SENSE_POLARITY −1 (reads below offset for +I)</text>
+  <text x="275" y="209" class="s">• bus-voltage divider (V_BUS_GAIN)</text>
+  <text x="275" y="227" class="s">• over-current comparator → TIM1 BKIN (break, MOE = 0)</text>
+
+  <rect x="740" y="110" width="400" height="135" rx="8" fill="#fff" stroke="#1565c0"/>
+  <text x="940" y="132" text-anchor="middle" class="t">Nucleo-F303RE (Cortex-M4F, 72 MHz)</text>
+  <text x="755" y="155" class="s">• TIM1 centre-aligned PWM CH1-3 + CH1N-3N (PA8-10, PA7, PB0-1)</text>
+  <text x="755" y="173" class="s">• TIM1 CC4 → triggers ADC1 injected sequence each period</text>
+  <text x="755" y="191" class="s">• ADC1 JDR1-4: i_a, i_b, i_c, v_bus</text>
+  <text x="755" y="209" class="s">• FPU (hard-float), CCM SRAM for the ISR call tree</text>
+  <text x="755" y="227" class="s">• PC8 = ISR-time pin (scope) · USART2 → ST-Link VCP (COM5)</text>
+
+  <rect x="1190" y="110" width="200" height="135" rx="8" fill="#fff" stroke="#1565c0"/>
+  <text x="1290" y="132" text-anchor="middle" class="t">BLDC motor</text>
+  <text x="1290" y="153" text-anchor="middle" class="s">Turnigy SK3 3542-1250KV</text>
+  <text x="1290" y="169" text-anchor="middle" class="s">Rs 0.023 Ω, Ld 5.6 / Lq 7.4 µH</text>
+  <text x="1290" y="185" text-anchor="middle" class="s">salient → HFI usable</text>
+  <text x="1290" y="207" text-anchor="middle" class="s">or Blue Robotics T200</text>
+  <text x="1290" y="223" text-anchor="middle" class="s">Rs 0.139 Ω, ψ 1.57 mWb, no HFI</text>
+
+  <rect x="1420" y="110" width="145" height="135" rx="8" fill="#fff" stroke="#1565c0"/>
+  <text x="1492" y="132" text-anchor="middle" class="t">PC host</text>
+  <text x="1492" y="155" text-anchor="middle" class="s">serial log 230400 8N1</text>
+  <text x="1492" y="173" text-anchor="middle" class="s">pio upload (SWD)</text>
+  <text x="1492" y="191" text-anchor="middle" class="s">OpenOCD mdw (live)</text>
+  <text x="1492" y="209" text-anchor="middle" class="s">tools/sim (host gcc)</text>
+
+  <path class="ln" d="M210,177 L258,177"/>
+  <path class="ln" d="M690,160 L738,160"/>
+  <path class="ln" d="M738,200 L692,200"/>
+  <path class="ln" d="M690,135 C 900,90 1100,90 1188,140"/>
+  <text x="940" y="96" text-anchor="middle" class="s">3 phase wires (U, V, W)</text>
+  <path class="ln" d="M1140,225 L1418,225"/>
+  <text x="590" y="152" class="s" fill="#1565c0">gate</text>
+  <text x="696" y="218" class="s" fill="#1565c0">I, V</text>
+
+  <!-- ================= CONTROL ISR ================= -->
+  <rect x="20" y="285" width="1170" height="580" rx="10" fill="#fff3e0" stroke="#e65100" stroke-width="2"/>
+  <text x="34" y="307" class="t" fill="#e65100">CONTROL ISR (every PWM period) — ADC_IRQ_Fast_Dispatch → HAL_ADCEx_InjectedConvCpltCallback (Src/freertos.c)</text>
+
+  <rect x="40" y="322" width="250" height="70" rx="8" fill="#ffe0b2" stroke="#e65100"/>
+  <text x="165" y="344" text-anchor="middle" class="t">Port: inputs</text>
+  <text x="165" y="363" text-anchor="middle" class="s">JDR1-4 → foc.adc_v_a/b/c/bus</text>
+  <text x="165" y="380" text-anchor="middle" class="s">PC8 high, DWT cycle count</text>
+
+  <rect x="40" y="790" width="250" height="60" rx="8" fill="#ffe0b2" stroke="#e65100"/>
+  <text x="165" y="812" text-anchor="middle" class="t">Port: outputs</text>
+  <text x="165" y="830" text-anchor="middle" class="s">pwm_a/b/c → TIM1 CCR1-3</text>
+  <text x="165" y="845" text-anchor="middle" class="s">outputs_enabled → Bridge_Outputs()</text>
+
+  <!-- foc-lib inside ISR -->
+  <rect x="320" y="322" width="855" height="530" rx="10" fill="#e8f5e9" stroke="#2e7d32" stroke-width="2"/>
+  <text x="334" y="342" class="t" fill="#2e7d32">foc-lib: FOC_Update()  (Lib/foc-lib, platform-neutral, FOC_FAST_CODE in CCM)</text>
+
+  <rect x="340" y="355" width="250" height="58" rx="6" fill="#fff" stroke="#2e7d32"/>
+  <text x="465" y="375" text-anchor="middle" class="t">ADC → currents, v_bus</text>
+  <text x="465" y="393" text-anchor="middle" class="s">offsets, polarity, LPF · bus faults</text>
+  <text x="465" y="407" text-anchor="middle" class="s">(V_BUS_MIN / V_BUS_MAX → coast)</text>
+
+  <rect x="620" y="355" width="540" height="58" rx="6" fill="#fff" stroke="#2e7d32"/>
+  <text x="890" y="375" text-anchor="middle" class="t">Mode switch (foc_mode / motor_mode)</text>
+  <text x="890" y="395" text-anchor="middle" class="s">FOC_CALIBRATION · FOC_SPEED_CONTROL / FOC_TORQUE_CONTROL · FOC_IDLE (bridge off)</text>
+  <path class="ln" d="M590,384 L618,384"/>
+  <path class="ln" d="M290,357 L338,380"/>
+
+  <!-- calibration -->
+  <rect x="340" y="430" width="250" height="135" rx="6" fill="#f1f8e9" stroke="#558b2f"/>
+  <text x="465" y="450" text-anchor="middle" class="t">Calibration (θ = inj_angle)</text>
+  <text x="352" y="470" class="s">Rs: DC ramp to CAL_CURRENT 5.25 A,</text>
+  <text x="352" y="485" class="s">  align hold, two levels → slope</text>
+  <text x="352" y="503" class="s">Ld: 1 kHz sine on d</text>
+  <text x="352" y="518" class="s">Lq: 1 kHz sine on q + d-axis hold</text>
+  <text x="352" y="536" class="s">saliency sweep (diagnostic)</text>
+  <text x="352" y="553" class="s">over-current → inj_fault</text>
+
+  <!-- startup -->
+  <rect x="620" y="430" width="540" height="135" rx="6" fill="#f1f8e9" stroke="#558b2f"/>
+  <text x="890" y="450" text-anchor="middle" class="t">Startup state machine (all current-controlled)</text>
+  <rect x="635" y="462" width="120" height="44" rx="5" fill="#c8e6c9" stroke="#2e7d32"/>
+  <text x="695" y="480" text-anchor="middle" class="s" font-weight="700">HFI start</text>
+  <text x="695" y="496" text-anchor="middle" class="s">lock · probe · N/S</text>
+  <rect x="790" y="462" width="80" height="44" rx="5" fill="#c8e6c9" stroke="#2e7d32"/>
+  <text x="830" y="480" text-anchor="middle" class="s" font-weight="700">Align</text>
+  <text x="830" y="496" text-anchor="middle" class="s">I_ALIGN</text>
+  <rect x="895" y="462" width="95" height="44" rx="5" fill="#c8e6c9" stroke="#2e7d32"/>
+  <text x="942" y="480" text-anchor="middle" class="s" font-weight="700">I-f ramp</text>
+  <text x="942" y="496" text-anchor="middle" class="s">→ OMEGA_FORCE</text>
+  <rect x="1015" y="462" width="125" height="44" rx="5" fill="#c8e6c9" stroke="#2e7d32"/>
+  <text x="1077" y="480" text-anchor="middle" class="s" font-weight="700">Transition</text>
+  <text x="1077" y="496" text-anchor="middle" class="s">eSMO + decaying offset</text>
+  <path class="ln" d="M755,484 L788,484"/>
+  <text x="772" y="476" text-anchor="middle" class="s" font-size="10">no</text>
+  <path class="ln" d="M870,484 L893,484"/>
+  <path class="ln" d="M990,484 L1013,484"/>
+  <text x="635" y="526" class="s">probe ok (salient) → RUNNING on HFI directly; probe fails → Align → I-f,</text>
+  <text x="635" y="542" class="s">hfi_salient = false (HFI off for this run). Lock check: eSMO locked, speed agrees,</text>
+  <text x="635" y="558" class="s">back-EMF plausible for FLUX_LINKAGE; else coast after LOCK_TIMEOUT.</text>
+  <path class="ln" d="M890,413 L890,428"/>
+  <path class="ln" d="M465,413 L465,428"/>
+
+  <!-- running -->
+  <rect x="340" y="580" width="820" height="262" rx="6" fill="#f1f8e9" stroke="#558b2f"/>
+  <text x="750" y="600" text-anchor="middle" class="t">MOTOR_RUNNING (closed loop)</text>
+  <path class="ln" d="M1077,506 C 1077,560 1000,560 1000,578"/>
+
+  <rect x="355" y="612" width="180" height="78" rx="5" fill="#fff" stroke="#2e7d32"/>
+  <text x="445" y="630" text-anchor="middle" class="s" font-weight="700">Speed loop (1 kHz)</text>
+  <text x="445" y="647" text-anchor="middle" class="s">speed_ref ramp → PI → iq_ref</text>
+  <text x="445" y="662" text-anchor="middle" class="s">motoring only (iq ≥ 0)</text>
+  <text x="445" y="677" text-anchor="middle" class="s">or torque mode: MTPA(is_ref)</text>
+
+  <rect x="555" y="612" width="190" height="78" rx="5" fill="#fff" stroke="#2e7d32"/>
+  <text x="650" y="630" text-anchor="middle" class="s" font-weight="700">Current loops</text>
+  <text x="650" y="647" text-anchor="middle" class="s">Clarke/Park at θ</text>
+  <text x="650" y="662" text-anchor="middle" class="s">PI id, iq → v_d, v_q</text>
+  <text x="650" y="677" text-anchor="middle" class="s">+ 6x harmonic comp</text>
+
+  <rect x="765" y="612" width="180" height="78" rx="5" fill="#fff" stroke="#2e7d32"/>
+  <text x="855" y="630" text-anchor="middle" class="s" font-weight="700">Inverse Park + SVPWM</text>
+  <text x="855" y="647" text-anchor="middle" class="s">θ + IPARK_DELAY_COMP</text>
+  <text x="855" y="662" text-anchor="middle" class="s">→ pwm_a/b/c</text>
+  <text x="855" y="677" text-anchor="middle" class="s">only if outputs_enabled</text>
+
+  <rect x="965" y="612" width="180" height="78" rx="5" fill="#fff" stroke="#2e7d32"/>
+  <text x="1055" y="630" text-anchor="middle" class="s" font-weight="700">Flux estimate</text>
+  <text x="1055" y="647" text-anchor="middle" class="s">|E| / ω above 2·OMEGA_FORCE</text>
+  <text x="1055" y="662" text-anchor="middle" class="s">→ bldc.flux (LPF 0.5 s)</text>
+  <text x="1055" y="677" text-anchor="middle" class="s">→ FOC_Min_Speed</text>
+
+  <path class="ln" d="M535,651 L553,651"/>
+  <path class="ln" d="M745,651 L763,651"/>
+
+  <rect x="355" y="708" width="250" height="122" rx="5" fill="#dcedc8" stroke="#33691e"/>
+  <text x="480" y="726" text-anchor="middle" class="s" font-weight="700">eSMO + PLL (SMO_Update)</text>
+  <text x="367" y="744" class="s">every period; back-EMF observer</text>
+  <text x="367" y="760" class="s">→ smo.theta_est, omega_est,</text>
+  <text x="367" y="776" class="s">   emf_magnitude, lock flag</text>
+  <text x="367" y="794" class="s">locks at |E| &gt; 0.1 V</text>
+  <text x="367" y="810" class="s">coefficients from Rs, Ls</text>
+  <text x="367" y="824" class="s">(FOC_Recalc_Params)</text>
+
+  <rect x="625" y="708" width="250" height="122" rx="5" fill="#dcedc8" stroke="#33691e"/>
+  <text x="750" y="726" text-anchor="middle" class="s" font-weight="700">HFI tracker (salient motors)</text>
+  <text x="637" y="744" class="s">square-wave injection hfi_v</text>
+  <text x="637" y="760" class="s">→ hfi_theta, hfi_omega</text>
+  <text x="637" y="778" class="s">on below HFI_OMEGA_ON,</text>
+  <text x="637" y="794" class="s">in control below 300 rad/s,</text>
+  <text x="637" y="810" class="s">back to eSMO above 390</text>
+  <text x="637" y="824" class="s">when both agree</text>
+
+  <rect x="895" y="708" width="250" height="122" rx="5" fill="#fff" stroke="#2e7d32"/>
+  <text x="1020" y="726" text-anchor="middle" class="s" font-weight="700">Angle selection</text>
+  <text x="907" y="746" class="s">θ, ω = active estimator</text>
+  <text x="907" y="762" class="s">(eSMO or HFI) + angle_offset</text>
+  <text x="907" y="780" class="s">that decays after a handover</text>
+  <text x="907" y="800" class="s">feeds current loops,</text>
+  <text x="907" y="816" class="s">inverse Park and speed loop</text>
+  <path class="ln" d="M605,769 L893,769"/>
+  <path class="ln" d="M875,790 L893,790"/>
+  <path class="ln" d="M1020,708 L1020,692 L650,692"/>
+
+  <!-- ISR flows -->
+  <path class="ln" d="M855,690 L855,700 L615,700 L615,838 L292,838"/>
+  <text x="440" y="854" class="s" fill="#2e7d32">duties, bridge state</text>
+
+  <!-- TIM1 to ISR -->
+  <path class="ln" d="M940,245 L940,283"/>
+  <text x="948" y="270" class="s">CC4 → ADC → IRQ</text>
+  <path class="ln" d="M165,790 C 100,700 100,300 760,248"/>
+  <text x="60" y="560" class="s" fill="#e65100" transform="rotate(-90 60 560)">CCR1-3, gate pins (AF ↔ GPIO off levels)</text>
+
+  <!-- ================= SAFETY ================= -->
+  <rect x="1210" y="285" width="370" height="300" rx="10" fill="#ffebee" stroke="#c62828" stroke-width="2"/>
+  <text x="1224" y="307" class="t" fill="#c62828">PROTECTION / FAULTS → coast</text>
+  <text x="1224" y="330" class="s">Coast = outputs_enabled false: six gate pins to GPIO</text>
+  <text x="1224" y="345" class="s">off levels (never clear MOE: it also stops the ADC trigger)</text>
+  <text x="1224" y="370" class="s">• Hardware over-current: break → MOE = 0, latched (AOE off)</text>
+  <text x="1224" y="390" class="s">• vbus_fault (over-voltage) / vbus_uv_fault</text>
+  <text x="1224" y="410" class="s">• Calibration over-current / no current → inj_fault</text>
+  <text x="1224" y="430" class="s">• Startup: observer never locks → coast (LOCK_TIMEOUT)</text>
+  <text x="1224" y="450" class="s">• eSMO loses lock in RUNNING → coast</text>
+  <text x="1224" y="470" class="s">• HFI: tracker lost, wrong pole (reverse), unexplained</text>
+  <text x="1224" y="485" class="s">   voltage (HFI_VBAL), tracker over-speed → hfi_fault</text>
+  <text x="1224" y="505" class="s">• No HFI and speed_ref &lt; FOC_Min_Speed()</text>
+  <text x="1224" y="520" class="s">   (1.5 × 0.1 V / flux) → stop, foc_mode = FOC_IDLE</text>
+  <text x="1224" y="545" class="s">• Motoring only: speed PI clamped at iq ≥ 0, so the</text>
+  <text x="1224" y="560" class="s">   bench supply never has to sink current</text>
+  <path class="lr" d="M1208,450 L1162,450"/>
+
+  <!-- ================= TASK ================= -->
+  <rect x="20" y="885" width="1170" height="180" rx="10" fill="#f3e5f5" stroke="#6a1b9a" stroke-width="2"/>
+  <text x="34" y="907" class="t" fill="#6a1b9a">DEMO TASK (FreeRTOS defaultTask, 512 B stack, printf integers only) — StartDefaultTask</text>
+  <g font-size="12">
+    <rect x="40" y="922" width="200" height="125" rx="6" fill="#fff" stroke="#6a1b9a"/>
+    <text x="140" y="942" text-anchor="middle" class="t">1. Offsets</text>
+    <text x="140" y="962" text-anchor="middle" class="s">Start_PWM (bridge off)</text>
+    <text x="140" y="978" text-anchor="middle" class="s">64-sample zero-current</text>
+    <text x="140" y="994" text-anchor="middle" class="s">average per phase</text>
+    <rect x="260" y="922" width="160" height="125" rx="6" fill="#fff" stroke="#6a1b9a"/>
+    <text x="340" y="942" text-anchor="middle" class="t">2. Bus check</text>
+    <text x="340" y="962" text-anchor="middle" class="s">v_bus ≥ V_BUS_MIN</text>
+    <text x="340" y="978" text-anchor="middle" class="s">else stop here</text>
+    <rect x="440" y="922" width="220" height="125" rx="6" fill="#fff" stroke="#6a1b9a"/>
+    <text x="550" y="942" text-anchor="middle" class="t">3. Calibrate</text>
+    <text x="550" y="962" text-anchor="middle" class="s">3a Rs (+ current-sign check)</text>
+    <text x="550" y="978" text-anchor="middle" class="s">3b Ld, Lq</text>
+    <text x="550" y="994" text-anchor="middle" class="s">3c FOC_Recalc_Params</text>
+    <rect x="680" y="922" width="190" height="125" rx="6" fill="#fff" stroke="#6a1b9a"/>
+    <text x="775" y="942" text-anchor="middle" class="t">4. Saliency sweep</text>
+    <text x="775" y="962" text-anchor="middle" class="s">24 angles, harmonic fit</text>
+    <text x="775" y="978" text-anchor="middle" class="s">(diagnostic only)</text>
+    <rect x="890" y="922" width="285" height="125" rx="6" fill="#fff" stroke="#6a1b9a"/>
+    <text x="1032" y="942" text-anchor="middle" class="t">5. Speed test (TEST_PROFILE)</text>
+    <text x="1032" y="962" text-anchor="middle" class="s">5a direction, current limit, FOC_Start</text>
+    <text x="1032" y="978" text-anchor="middle" class="s">5b profile → speed_ref, events, 50 Hz log;</text>
+    <text x="1032" y="994" text-anchor="middle" class="s">   restart after a min-speed stop</text>
+    <text x="1032" y="1010" text-anchor="middle" class="s">5c report (ISR cycles, flux), FOC_Stop</text>
+    <text x="1032" y="1026" text-anchor="middle" class="s">5d coast check (ia, ib ≈ 0)</text>
+    <path class="ln" d="M240,985 L258,985"/>
+    <path class="ln" d="M420,985 L438,985"/>
+    <path class="ln" d="M660,985 L678,985"/>
+    <path class="ln" d="M870,985 L888,985"/>
+  </g>
+  <path class="lp" d="M550,922 L465,567"/>
+  <text x="470" y="880" class="s" fill="#6a1b9a">FOC_Start_Measurement / Busy</text>
+  <path class="lp" d="M1032,922 L1032,844"/>
+  <text x="1040" y="878" class="s" fill="#6a1b9a">speed_ref, FOC_Start/Stop; reads foc state</text>
+
+  <!-- ================= LEGEND ================= -->
+  <rect x="1210" y="605" width="370" height="460" rx="10" fill="#fff" stroke="#999"/>
+  <text x="1224" y="628" class="t">Legend</text>
+  <rect x="1224" y="642" width="26" height="16" fill="#e3f2fd" stroke="#1565c0"/><text x="1260" y="655" class="s">Hardware</text>
+  <rect x="1224" y="666" width="26" height="16" fill="#fff3e0" stroke="#e65100"/><text x="1260" y="679" class="s">Port layer / control ISR (Src/freertos.c)</text>
+  <rect x="1224" y="690" width="26" height="16" fill="#e8f5e9" stroke="#2e7d32"/><text x="1260" y="703" class="s">foc-lib (Lib/foc-lib), runs inside the ISR</text>
+  <rect x="1224" y="714" width="26" height="16" fill="#dcedc8" stroke="#33691e"/><text x="1260" y="727" class="s">Angle estimators (eSMO, HFI)</text>
+  <rect x="1224" y="738" width="26" height="16" fill="#f3e5f5" stroke="#6a1b9a"/><text x="1260" y="751" class="s">Demo task (thread context)</text>
+  <rect x="1224" y="762" width="26" height="16" fill="#ffebee" stroke="#c62828"/><text x="1260" y="775" class="s">Protection and faults</text>
+  <path class="ln" d="M1224,798 L1250,798"/><text x="1260" y="802" class="s">signal / data flow</text>
+  <path class="lp" d="M1224,820 L1250,820"/><text x="1260" y="824" class="s">task ↔ shared FOC_t foc (no locking)</text>
+  <path class="lr" d="M1224,842 L1250,842"/><text x="1260" y="846" class="s">fault → coast</text>
+  <text x="1224" y="878" class="t">Speed ranges (SK3, rad/s el)</text>
+  <text x="1224" y="898" class="s">0 … 300    HFI in control</text>
+  <text x="1224" y="914" class="s">300 … 390  hysteresis band</text>
+  <text x="1224" y="930" class="s">&gt; 390      eSMO in control</text>
+  <text x="1224" y="954" class="t">Speed ranges (T200, no HFI)</text>
+  <text x="1224" y="974" class="s">&lt; FOC_Min_Speed (~107)  → motor stops</text>
+  <text x="1224" y="990" class="s">≥ FOC_Min_Speed           eSMO</text>
+  <text x="1224" y="1014" class="s">Build: PlatformIO, -O2, hard-float,</text>
+  <text x="1224" y="1030" class="s">RAM 78.6 %, Flash 10.1 %</text>
+</svg>

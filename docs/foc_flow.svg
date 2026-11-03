@@ -1,0 +1,241 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 1180" font-family="Times New Roman, serif" font-size="17">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#222"/>
+    </marker>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#c62828"/>
+    </marker>
+    <marker id="ag" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#2e7d32"/>
+    </marker>
+    <style>
+      .b{fill:#fff;stroke:#222;stroke-width:1.6}
+      .ctl{fill:#e3f2fd;stroke:#1565c0;stroke-width:1.6}
+      .tr{fill:#fff8e1;stroke:#f57f17;stroke-width:1.6}
+      .est{fill:#e8f5e9;stroke:#2e7d32;stroke-width:1.6}
+      .hw{fill:#eceff1;stroke:#455a64;stroke-width:1.6}
+      .ln{stroke:#222;stroke-width:1.5;fill:none;marker-end:url(#a)}
+      .lr{stroke:#c62828;stroke-width:1.5;fill:none;marker-end:url(#ar)}
+      .lg{stroke:#2e7d32;stroke-width:1.5;fill:none;marker-end:url(#ag)}
+      .sum{fill:#fff;stroke:#222;stroke-width:1.5}
+      .c{text-anchor:middle}
+      .i{font-style:italic}
+      .sm{font-size:14px}
+      .cap{font-size:18px;text-anchor:middle}
+      .hd{font-family:Segoe UI, Arial, sans-serif;font-weight:700;font-size:15px}
+    </style>
+  </defs>
+  <rect width="1200" height="1180" fill="#fff"/>
+
+  <!-- ===================== (a) FOC scheme ===================== -->
+  <rect x="20" y="20" width="1000" height="430" rx="22" fill="none" stroke="#222" stroke-width="3" stroke-dasharray="14 10"/>
+  <text x="40" y="48" class="hd">FOC_Update() — every PWM period (20 kHz)</text>
+  <text x="660" y="610" class="sm" fill="#2e7d32">T<tspan font-size="11" dy="4">d</tspan><tspan dy="-4"> = IPARK_DELAY_COMP·Ts: advance for the one-period duty delay</tspan></text>
+
+  <!-- speed loop -->
+  <text x="40" y="100" class="i">ω</text><text x="52" y="105" class="i sm">ref</text>
+  <path class="ln" d="M40,112 L117,112"/>
+  <text x="62" y="132" class="sm">+</text>
+  <circle cx="130" cy="112" r="12" class="sum"/>
+  <path class="ln" d="M142,112 L168,112"/>
+  <rect x="170" y="94" width="58" height="36" class="ctl"/><text x="199" y="118" class="c">PI</text>
+  <text x="199" y="148" class="c sm" fill="#1565c0">1 kHz, i ≥ 0</text>
+  <path class="ln" d="M228,112 L307,112"/>
+  <text x="240" y="104" class="i">i</text><text x="248" y="109" class="i sm">q,ref</text>
+  <text x="285" y="132" class="sm">+</text>
+
+  <!-- q current loop -->
+  <circle cx="320" cy="112" r="12" class="sum"/>
+  <path class="ln" d="M332,112 L358,112"/>
+  <rect x="360" y="94" width="58" height="36" class="ctl"/><text x="389" y="118" class="c">PI</text>
+  <path class="ln" d="M418,112 L478,112"/>
+  <text x="428" y="104" class="i">u</text><text x="438" y="109" class="i sm">q</text><text x="446" y="100" class="sm">*</text>
+
+  <!-- d current loop -->
+  <text x="190" y="190" class="i">i</text><text x="198" y="195" class="i sm">d,ref</text>
+  <text x="190" y="214" class="sm">(0 or MTPA)</text>
+  <path class="ln" d="M190,200 L307,200"/>
+  <text x="285" y="220" class="sm">+</text>
+  <circle cx="320" cy="200" r="12" class="sum"/>
+  <path class="ln" d="M332,200 L358,200"/>
+  <rect x="360" y="182" width="58" height="36" class="ctl"/><text x="389" y="206" class="c">PI</text>
+  <path class="ln" d="M418,200 L478,200"/>
+  <text x="428" y="192" class="i">u</text><text x="438" y="197" class="i sm">d</text><text x="446" y="188" class="sm">*</text>
+
+  <!-- Park^-1 -->
+  <rect x="480" y="80" width="80" height="150" class="tr"/>
+  <line x1="480" y1="230" x2="560" y2="80" stroke="#222"/>
+  <text x="497" y="110" class="i">dq</text><text x="520" y="215" class="i">αβ</text>
+  <text x="520" y="70" class="c">Park</text><text x="545" y="62" class="sm">−1</text>
+  <path class="ln" d="M560,112 L618,112"/>
+  <path class="ln" d="M560,200 L618,200"/>
+  <text x="570" y="104" class="i">u</text><text x="580" y="109" class="i sm">α</text><text x="588" y="100" class="sm">*</text>
+  <text x="570" y="192" class="i">u</text><text x="580" y="197" class="i sm">β</text><text x="588" y="188" class="sm">*</text>
+
+  <!-- SVPWM -->
+  <rect x="620" y="80" width="100" height="150" class="ctl"/>
+  <text x="670" y="150" class="c">SV</text><text x="670" y="172" class="c">PWM</text>
+  <path class="ln" d="M720,120 L778,120"/><path class="ln" d="M720,140 L778,140"/><path class="ln" d="M720,160 L778,160"/>
+  <path class="ln" d="M720,180 L778,180"/><path class="ln" d="M720,200 L778,200"/><path class="ln" d="M720,220 L778,220"/>
+
+  <!-- inverter -->
+  <rect x="780" y="80" width="80" height="160" class="hw"/>
+  <text x="820" y="140" class="c sm">3-phase</text><text x="820" y="158" class="c sm">bridge</text>
+  <text x="820" y="196" class="c sm">TIM1,</text><text x="820" y="212" class="c sm">IHM08M1</text>
+  <text x="830" y="40" class="i">V</text><text x="842" y="45" class="i sm">dc</text>
+  <path class="ln" d="M850,50 L850,60 L670,60 L670,78"/>
+  <path d="M850,50 L850,78" stroke="#222" stroke-width="1.5"/>
+
+  <!-- motor -->
+  <circle cx="930" cy="400" r="45" class="hw"/>
+  <text x="930" y="396" class="c" font-weight="700">Motor</text><text x="930" y="416" class="c" font-weight="700">BLDC</text>
+  <path d="M800,240 L800,400 L885,400" stroke="#222" stroke-width="1.5" fill="none"/>
+  <path d="M820,240 L820,385 L888,385" stroke="#222" stroke-width="1.5" fill="none"/>
+  <path d="M840,240 L840,370 L893,370" stroke="#222" stroke-width="1.5" fill="none"/>
+
+  <!-- Clarke -->
+  <rect x="620" y="270" width="80" height="90" class="tr"/>
+  <line x1="620" y1="360" x2="700" y2="270" stroke="#222"/>
+  <text x="632" y="292" class="i">αβ</text><text x="660" y="350" class="i">abc</text>
+  <text x="660" y="382" class="c">Clarke</text>
+  <path class="ln" d="M800,290 L702,290"/><circle cx="800" cy="290" r="3" fill="#222"/>
+  <path class="ln" d="M820,315 L702,315"/><circle cx="820" cy="315" r="3" fill="#222"/>
+  <text x="722" y="283" class="i sm">i</text><text x="728" y="287" class="i" font-size="11">a</text>
+  <text x="722" y="308" class="i sm">i</text><text x="728" y="312" class="i" font-size="11">b</text>
+  <text x="740" y="345" class="sm">shunts</text>
+
+  <!-- Park -->
+  <rect x="480" y="270" width="80" height="90" class="tr"/>
+  <line x1="480" y1="360" x2="560" y2="270" stroke="#222"/>
+  <text x="492" y="292" class="i">αβ</text><text x="520" y="350" class="i">dq</text>
+  <text x="520" y="382" class="c">Park</text>
+  <path class="ln" d="M620,295 L562,295"/>
+  <path class="ln" d="M620,335 L562,335"/>
+  <circle cx="595" cy="295" r="3" fill="#222"/><circle cx="580" cy="335" r="3" fill="#222"/>
+  <text x="575" y="288" class="i sm">i</text><text x="581" y="292" class="i" font-size="11">α</text>
+  <text x="590" y="330" class="i sm">i</text><text x="596" y="334" class="i" font-size="11">β</text>
+
+  <!-- feedback id, iq -->
+  <path class="ln" d="M480,295 L320,295 L320,214"/>
+  <path class="ln" d="M480,335 L300,335 L300,240 L250,240 L250,145 L320,145 L320,126"/>
+  <text x="300" y="232" class="sm">−</text><text x="327" y="235" class="sm">−</text>
+  <text x="330" y="140" class="sm">−</text>
+  <text x="420" y="288" class="i sm">i</text><text x="426" y="292" class="i" font-size="11">d</text>
+  <text x="420" y="328" class="i sm">i</text><text x="426" y="332" class="i" font-size="11">q</text>
+
+  <!-- ===== estimators (outside the dashed box, like the reference) ===== -->
+  <rect x="330" y="465" width="190" height="62" rx="4" class="est"/>
+  <text x="425" y="492" class="c">eSMO + PLL</text><text x="425" y="514" class="c sm">(see b)</text>
+  <rect x="330" y="555" width="190" height="62" rx="4" class="est" stroke-dasharray="6 4"/>
+  <text x="425" y="581" class="c">HFI tracker</text><text x="425" y="603" class="c sm">salient motors, ω &lt; 300</text>
+  <rect x="110" y="490" width="120" height="100" rx="4" class="est"/>
+  <text x="170" y="526" class="c sm">select</text><text x="170" y="546" class="c sm">eSMO / HFI</text><text x="170" y="566" class="c sm">(+ startup)</text>
+
+  <!-- i_alpha, i_beta taps (from the Clarke outputs) -->
+  <path class="ln" d="M595,295 L595,482 L522,482"/>
+  <path class="ln" d="M580,335 L580,496 L522,496"/>
+  <circle cx="595" cy="482" r="3" fill="#222"/>
+  <circle cx="580" cy="496" r="3" fill="#222"/>
+  <path class="ln" d="M595,482 L595,576 L522,576"/>
+  <path class="ln" d="M580,496 L580,590 L522,590"/>
+  <text x="604" y="476" class="i sm">i</text><text x="610" y="480" class="i" font-size="11">α</text><text x="618" y="476" class="i sm">, i</text><text x="633" y="480" class="i" font-size="11">β</text>
+  <text x="604" y="586" class="i sm">i</text><text x="610" y="590" class="i" font-size="11">α</text><text x="618" y="586" class="i sm">, i</text><text x="633" y="590" class="i" font-size="11">β</text>
+  <!-- u_alpha, u_beta (applied in the last period) -->
+  <path class="ln" d="M720,510 L522,510"/>
+  <path class="ln" d="M720,524 L522,524"/>
+  <text x="728" y="512" class="i">u</text><text x="738" y="517" class="i sm">α</text>
+  <text x="728" y="530" class="i">u</text><text x="738" y="535" class="i sm">β</text>
+  <text x="760" y="522" class="sm">(last period)</text>
+
+  <path class="ln" d="M330,496 L232,520"/>
+  <path class="ln" d="M330,586 L232,562"/>
+
+  <!-- theta, omega out -->
+  <path class="lg" d="M170,490 L170,420 L520,420 L520,362"/>
+  <path class="lg" d="M520,420 L460,420 L460,250 L520,250 L520,232"/>
+  <text x="530" y="415" class="i" fill="#2e7d32">θ̂</text>
+  <text x="528" y="258" class="i" fill="#2e7d32">θ̂ + ω̂T<tspan class="sm" dy="5">d</tspan></text>
+  <path class="lg" d="M110,540 L90,540 L90,150 L130,150 L130,124"/>
+  <text x="70" y="400" class="i" fill="#2e7d32">ω̂</text>
+  <text x="112" y="140" class="sm">−</text>
+
+  <!-- protection hint -->
+  <rect x="1040" y="80" width="140" height="160" rx="6" fill="#ffebee" stroke="#c62828"/>
+  <text x="1110" y="104" class="c hd" fill="#c62828">Coast</text>
+  <text x="1110" y="128" class="c sm">over-current</text>
+  <text x="1110" y="148" class="c sm">bus fault</text>
+  <text x="1110" y="168" class="c sm">lock lost</text>
+  <text x="1110" y="188" class="c sm">HFI fault</text>
+  <text x="1110" y="208" class="c sm">ω_ref &lt; min</text>
+  <text x="1110" y="228" class="c sm">(no HFI)</text>
+  <path class="lr" d="M1040,160 L862,160"/>
+
+  <text x="520" y="640" class="cap">(a) FOC scheme</text>
+
+  <!-- ===================== (b) eSMO ===================== -->
+  <text x="40" y="690" class="hd">(b) eSMO + PLL (SMO_Update)</text>
+  <text x="40" y="772" class="i">u</text><text x="50" y="777" class="i sm">α</text><text x="58" y="772" class="i">, u</text><text x="78" y="777" class="i sm">β</text>
+  <path class="ln" d="M40,782 L128,782"/>
+  <rect x="130" y="750" width="150" height="64" class="est"/>
+  <text x="205" y="777" class="c">Current</text><text x="205" y="799" class="c">observer</text>
+  <path class="ln" d="M280,782 L355,782"/>
+  <text x="292" y="772" class="i">î</text><text x="300" y="777" class="i sm">α</text><text x="308" y="772" class="i">, î</text><text x="323" y="777" class="i sm">β</text>
+  <text x="335" y="802" class="sm">+</text>
+  <circle cx="368" cy="782" r="12" class="sum"/>
+  <path d="M360,774 L376,790 M376,774 L360,790" stroke="#222" stroke-width="1.3"/>
+  <path class="ln" d="M368,732 L368,768"/>
+  <text x="376" y="750" class="i">i</text><text x="383" y="755" class="i sm">α</text><text x="391" y="750" class="i">, i</text><text x="406" y="755" class="i sm">β</text>
+  <text x="352" y="760" class="sm">−</text>
+  <path class="ln" d="M380,782 L438,782"/>
+  <rect x="440" y="750" width="100" height="64" class="est"/>
+  <text x="490" y="777" class="c">Sat</text><text x="490" y="799" class="c sm">±k (≈ sign)</text>
+  <path class="ln" d="M540,782 L668,782"/>
+  <text x="560" y="772" class="i">z</text><text x="570" y="777" class="i sm">α</text><text x="578" y="772" class="i">, z</text><text x="595" y="777" class="i sm">β</text>
+  <circle cx="610" cy="782" r="3" fill="#222"/>
+  <path class="ln" d="M610,782 L610,860 L205,860 L205,816"/>
+  <rect x="670" y="750" width="130" height="64" class="est"/>
+  <text x="735" y="777" class="c">Back-EMF</text><text x="735" y="799" class="c sm">LPF ω_c = k|ω̂|</text>
+  <path class="ln" d="M800,782 L878,782"/>
+  <text x="815" y="772" class="i">ê</text><text x="823" y="777" class="i sm">α</text><text x="831" y="772" class="i">, ê</text><text x="847" y="777" class="i sm">β</text>
+  <circle cx="840" cy="782" r="3" fill="#222"/>
+  <path class="ln" d="M840,782 L840,880 L170,880 L170,816"/>
+  <text x="440" y="896" class="c sm">ê (extended back-EMF model)</text>
+  <rect x="880" y="750" width="110" height="64" class="est"/>
+  <text x="935" y="777" class="c">PLL</text><text x="935" y="799" class="c sm">PI → ∫</text>
+  <path class="ln" d="M990,770 L1060,770"/><text x="1068" y="776" class="i">ω̂</text>
+  <path class="ln" d="M990,800 L1060,800"/><text x="1068" y="806" class="i">θ̂</text>
+  <text x="1095" y="806" class="sm">+ lag comp.</text>
+  <path class="ln" d="M935,750 L935,712 L205,712 L205,748"/>
+  <text x="640" y="706" class="c sm">ω̂ (saliency term, LPF cut-off)</text>
+  <text x="880" y="840" class="sm">lock: |ê| &gt; 0.1 V</text>
+
+  <!-- ===================== (c) PI ===================== -->
+  <text x="40" y="950" class="hd">(c) PI controller (speed, i_d, i_q)</text>
+  <text x="40" y="1032" class="i">e</text>
+  <path class="ln" d="M40,1042 L130,1042"/>
+  <circle cx="110" cy="1042" r="3" fill="#222"/>
+  <path class="ln" d="M110,1042 L110,1000 L198,1000"/>
+  <path class="ln" d="M110,1042 L110,1090 L198,1090"/>
+  <rect x="200" y="980" width="80" height="40" class="ctl"/><text x="240" y="1006" class="c i">K</text><text x="252" y="1011" class="i sm">p</text>
+  <rect x="200" y="1070" width="80" height="40" class="ctl"/><text x="240" y="1096" class="c i">K</text><text x="252" y="1101" class="i sm">i</text><text x="262" y="1096" class="i">T</text><text x="270" y="1101" class="i sm">s</text>
+  <path class="ln" d="M280,1090 L338,1090"/>
+  <rect x="340" y="1065" width="120" height="50" class="ctl"/>
+  <text x="400" y="1088" class="c">Σ (integrator)</text><text x="400" y="1108" class="c sm">clamped to limit</text>
+  <path class="ln" d="M460,1090 L520,1090 L520,1056"/>
+  <path class="ln" d="M280,1000 L520,1000 L520,1030"/>
+  <circle cx="520" cy="1042" r="12" class="sum"/>
+  <text x="500" y="1026" class="sm">+</text><text x="527" y="1068" class="sm">+</text>
+  <path class="ln" d="M532,1042 L598,1042"/>
+  <rect x="600" y="1015" width="110" height="54" class="ctl"/>
+  <path d="M615,1055 L635,1055 L685,1030 L700,1030" stroke="#222" stroke-width="1.5" fill="none"/>
+  <text x="655" y="1082" class="c sm">output limit</text>
+  <path class="ln" d="M710,1042 L790,1042"/><text x="800" y="1048" class="i">u</text>
+  <text x="840" y="990" class="sm">Limits:</text>
+  <text x="840" y="1012" class="sm">speed PI: 0 … current limit (motoring only)</text>
+  <text x="840" y="1034" class="sm">i_d PI: ± V_dc/√3</text>
+  <text x="840" y="1056" class="sm">i_q PI: ± √((V_dc/√3)² − u_d²)</text>
+  <text x="840" y="1078" class="sm">gains from Rs, Ld, Lq (calibrated)</text>
+
+  <text x="600" y="1150" class="cap" font-style="italic">Field-oriented control in foc-lib</text>
+</svg>
