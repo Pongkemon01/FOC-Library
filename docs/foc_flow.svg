@@ -213,7 +213,7 @@
   <!-- ===================== (c) PI ===================== -->
   <text x="40" y="950" class="hd">(c) PI controller (speed, i_d, i_q)</text>
   <text x="40" y="1032" class="i">e</text>
-  <path class="ln" d="M40,1042 L130,1042"/>
+  <path d="M40,1042 L110,1042" stroke="#222" stroke-width="1.5" fill="none"/>
   <circle cx="110" cy="1042" r="3" fill="#222"/>
   <path class="ln" d="M110,1042 L110,1000 L198,1000"/>
   <path class="ln" d="M110,1042 L110,1090 L198,1090"/>
