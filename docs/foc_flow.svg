@@ -32,6 +32,7 @@
   <rect x="20" y="20" width="1000" height="430" rx="22" fill="none" stroke="#222" stroke-width="3" stroke-dasharray="14 10"/>
   <text x="40" y="48" class="hd">FOC_Update() — every PWM period (20 kHz)</text>
   <text x="660" y="610" class="sm" fill="#2e7d32">T<tspan font-size="11" dy="4">d</tspan><tspan dy="-4"> = IPARK_DELAY_COMP·Ts: advance for the one-period duty delay</tspan></text>
+  <text x="660" y="632" class="sm" fill="#1565c0">ff: u<tspan font-size="11" dy="4">d</tspan><tspan dy="-4"> = −ω̂</tspan><tspan font-size="11" dy="4">f</tspan><tspan dy="-4"> L</tspan><tspan font-size="11" dy="4">q</tspan><tspan dy="-4"> i</tspan><tspan font-size="11" dy="4">q,ref</tspan><tspan dy="-4">,  u</tspan><tspan font-size="11" dy="4">q</tspan><tspan dy="-4"> = ω̂</tspan><tspan font-size="11" dy="4">f</tspan><tspan dy="-4">(L</tspan><tspan font-size="11" dy="4">d</tspan><tspan dy="-4"> i</tspan><tspan font-size="11" dy="4">d,ref</tspan><tspan dy="-4"> + ψ),  ω̂</tspan><tspan font-size="11" dy="4">f</tspan><tspan dy="-4"> = ω̂ LPF 100 Hz</tspan></text>
 
   <!-- speed loop -->
   <text x="40" y="100" class="i">ω</text><text x="52" y="105" class="i sm">ref</text>
@@ -49,8 +50,11 @@
   <circle cx="320" cy="112" r="12" class="sum"/>
   <path class="ln" d="M332,112 L358,112"/>
   <rect x="360" y="94" width="58" height="36" class="ctl"/><text x="389" y="118" class="c">PI</text>
-  <path class="ln" d="M418,112 L478,112"/>
-  <text x="428" y="104" class="i">u</text><text x="438" y="109" class="i sm">q</text><text x="446" y="100" class="sm">*</text>
+  <path class="ln" d="M418,112 L436,112"/>
+  <circle cx="450" cy="112" r="12" class="sum"/>
+  <text x="424" y="106" class="sm">+</text><text x="456" y="138" class="sm">+</text>
+  <path class="ln" d="M462,112 L478,112"/>
+  <text x="440" y="92" class="i">u</text><text x="450" y="97" class="i sm">q</text><text x="458" y="88" class="sm">*</text>
 
   <!-- d current loop -->
   <text x="190" y="190" class="i">i</text><text x="198" y="195" class="i sm">d,ref</text>
@@ -60,8 +64,28 @@
   <circle cx="320" cy="200" r="12" class="sum"/>
   <path class="ln" d="M332,200 L358,200"/>
   <rect x="360" y="182" width="58" height="36" class="ctl"/><text x="389" y="206" class="c">PI</text>
-  <path class="ln" d="M418,200 L478,200"/>
-  <text x="428" y="192" class="i">u</text><text x="438" y="197" class="i sm">d</text><text x="446" y="188" class="sm">*</text>
+  <path class="ln" d="M418,200 L436,200"/>
+  <circle cx="450" cy="200" r="12" class="sum"/>
+  <text x="424" y="216" class="sm">+</text><text x="456" y="184" class="sm">+</text>
+  <path class="ln" d="M462,200 L478,200"/>
+  <text x="440" y="236" class="i">u</text><text x="450" y="241" class="i sm">d</text><text x="458" y="232" class="sm">*</text>
+
+  <!-- decoupling + back-EMF feedforward -->
+  <rect x="352" y="138" width="80" height="40" class="ctl"/>
+  <text x="392" y="154" class="c sm">decoupling</text><text x="392" y="171" class="c sm">+ EMF ff</text>
+  <path class="ln" d="M432,148 L450,148 L450,126"/>
+  <path class="ln" d="M432,166 L450,166 L450,186"/>
+  <!-- ff inputs: i_q,ref, i_d,ref taps and omega (low-passed) -->
+  <circle cx="270" cy="112" r="3" fill="#222"/>
+  <path class="ln" d="M270,112 L270,160 L350,160"/>
+  <circle cx="280" cy="200" r="3" fill="#222"/>
+  <path class="ln" d="M280,200 L280,172 L350,172"/>
+  <circle cx="90" cy="150" r="3" fill="#2e7d32"/>
+  <path d="M90,150 L90,70 L188,70" stroke="#2e7d32" stroke-width="1.5" fill="none"/>
+  <rect x="190" y="58" width="80" height="24" class="est"/>
+  <text x="230" y="75" class="c sm">LPF 100 Hz</text>
+  <path class="lg" d="M270,70 L336,70 L336,145 L350,145"/>
+  <text x="290" y="64" class="i" fill="#2e7d32">ω̂<tspan class="sm" dy="5">f</tspan></text>
 
   <!-- Park^-1 -->
   <rect x="480" y="80" width="80" height="150" class="tr"/>
@@ -120,7 +144,7 @@
   <path class="ln" d="M480,295 L320,295 L320,214"/>
   <path class="ln" d="M480,335 L300,335 L300,240 L250,240 L250,145 L320,145 L320,126"/>
   <text x="300" y="232" class="sm">−</text><text x="327" y="235" class="sm">−</text>
-  <text x="330" y="140" class="sm">−</text>
+  <text x="306" y="140" class="sm">−</text>
   <text x="420" y="288" class="i sm">i</text><text x="426" y="292" class="i" font-size="11">d</text>
   <text x="420" y="328" class="i sm">i</text><text x="426" y="332" class="i" font-size="11">q</text>
 
@@ -226,6 +250,8 @@
   <path class="ln" d="M280,1000 L520,1000 L520,1030"/>
   <circle cx="520" cy="1042" r="12" class="sum"/>
   <text x="500" y="1026" class="sm">+</text><text x="527" y="1068" class="sm">+</text>
+  <text x="330" y="1047" class="sm">u<tspan font-size="11" dy="4">ff</tspan><tspan dy="-4"> (i_d, i_q only)</tspan></text>
+  <path class="ln" d="M455,1042 L508,1042"/><text x="496" y="1060" class="sm">+</text>
   <path class="ln" d="M532,1042 L598,1042"/>
   <rect x="600" y="1015" width="110" height="54" class="ctl"/>
   <path d="M615,1055 L635,1055 L685,1030 L700,1030" stroke="#222" stroke-width="1.5" fill="none"/>
@@ -233,9 +259,10 @@
   <path class="ln" d="M710,1042 L790,1042"/><text x="800" y="1048" class="i">u</text>
   <text x="840" y="990" class="sm">Limits:</text>
   <text x="840" y="1012" class="sm">speed PI: 0 … current limit (motoring only)</text>
-  <text x="840" y="1034" class="sm">i_d PI: ± V_dc/√3</text>
-  <text x="840" y="1056" class="sm">i_q PI: ± √((V_dc/√3)² − u_d²)</text>
-  <text x="840" y="1078" class="sm">gains from Rs, Ld, Lq (calibrated)</text>
+  <text x="840" y="1034" class="sm">i_d PI + u_ff: ± V_dc/√3</text>
+  <text x="840" y="1056" class="sm">i_q PI + u_ff: ± √((V_dc/√3)² − u_d²)</text>
+  <text x="840" y="1078" class="sm">K_p = L_d ω_c (d), min(L_q, 2L_d) ω_c (q)</text>
+  <text x="840" y="1100" class="sm">K_i = R_s ω_c (calibrated Rs, Ld, Lq)</text>
 
   <text x="600" y="1150" class="cap" font-style="italic">Field-oriented control in foc-lib</text>
 </svg>
