@@ -5,6 +5,27 @@ Git history starts on 2026-10-26; this file holds the record before that and the
 status of each change (compile / sim / hardware). Newest first below; older sections are
 history (marked superseded where they no longer apply).
 
+## 2026-11-04: current loop: dq decoupling + back-EMF feedforward, q-axis PI tuned on Lq
+
+- `FOC_Current_Control` adds `vd_ff = -w Lq iq_ref`, `vq_ff = w (Ld id_ref + flux)` to the d/q PIs.
+  It uses the references (not the measured currents: no 6x ripple or shunt noise in the voltage)
+  and `foc->omega_ff`, `foc->omega` low-passed at 100 Hz (`FF_OMEGA_LPF_HZ`). Unfiltered, the
+  step from the forced speed to the eSMO speed at the TRANSITION entry stepped vq and kicked the
+  current to 3.6 A (sim, 3.2 A before); filtered it is back to 3.2 A. `omega_ff` is reset with
+  `omega` (init, stop/coast, MOTOR_IDLE). Always on in every state that runs the current PIs.
+- New `PI_Step_FF`: the limit and the back-calculation act on PI + ff, so the integrator does not
+  wind up while ff alone is near the voltage limit. `PI_Step` (speed loop, pi_windup sim) unchanged.
+- `FOC_Recalc_Params`: q-axis `Kp = min(Lq, 2 Ld) * wc` (was Ld for both axes; SK3 Lq/Ld 1.27 put
+  the q crossover at ~790 Hz). The 2 Ld cap keeps a bad Lq (T200: 62-212 uH) from pushing the q
+  crossover past ~2 kHz. Ki stays `Rs * wc`. Before calibration Ld = Lq = LS: no change.
+- Build: RAM 78.6 %, Flash 10.1 %. Sim (compared with the code before the change): startup_sim
+  forward/reverse/coast, speed_sim (with and without HD/HP harmonics), esmo_sim, HFI PROF=low and
+  PROF=start: same transitions, holds, ripple and HFI handovers; peak currents within 0.1 A.
+  The speed_sim ramp 1500 -> 2500 shows iq tracking within ~0.03 A both before and after (the
+  slewed reference is too slow to show a difference). **Not bench-verified**: check ISR cycles
+  (`isr_cyc`/`irq_cyc`, expect ~+20), the harmonic reduction (-75-80 %), i_d ~ 0 at constant
+  speed, and the handover current on the SK3.
+
 ## 2026-11-02: demo (Src/freertos.c) restructured, no behaviour change
 
 - StartDefaultTask runs five numbered steps, one function each: Measure_Current_Offsets,

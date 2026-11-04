@@ -445,6 +445,7 @@ typedef struct
     // own state (smo.theta_est) is never overwritten.
     float theta;           // Electrical angle for the transforms (rad, 0..2pi)
     float omega;           // Rate of theta (electrical rad/s), for the inverse-Park delay advance
+    float omega_ff;        // omega low-pass filtered for the current-loop feedforward (electrical rad/s)
     bool outputs_enabled;  // false: the HAL must disable the gate driver / PWM outputs (coast)
 
     // Temporary variables for FOC control

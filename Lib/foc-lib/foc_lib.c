@@ -83,6 +83,10 @@
 #define CURRENT_CONTROL_O_BANDWIDTH (TWO_PI * CURRENT_CONTROL_F_BANDWIDTH) // Current control bandwidth (rad/s)
 #define KP_I (LS * CURRENT_CONTROL_O_BANDWIDTH)                            // Current controller proportional gain
 #define KI_I (RS * CURRENT_CONTROL_O_BANDWIDTH)                            // Current controller integral gain
+// Speed for the decoupling / back-EMF feedforward: foc->omega low-passed, so its steps (forced ->
+// eSMO speed at the transition, eSMO <-> HFI) do not step the voltage (sim: +0.4 A unfiltered)
+#define FF_OMEGA_LPF_HZ 100.0f
+#define FF_OMEGA_ALPHA (TWO_PI * FF_OMEGA_LPF_HZ * TS)
 // Speed loop: runs inside FOC_Update (MOTOR_RUNNING, FOC_SPEED_CONTROL) every SPEED_CTRL_DIVIDER
 // periods. Plant: d(omega_el)/dt = SPEED_PLANT_GAIN * iq. Motoring only (no regenerative braking):
 // a bench supply cannot absorb the returned energy.
@@ -297,6 +301,25 @@ FOC_INLINE float PI_Step(PI_Controller_t *controller, float error)
     }
 
     // Update the integral state for the next iteration
+    controller->integral += integral;
+
+    return output;
+}
+
+// PI step plus a feedforward term ff: the limit and the anti-windup act on the total
+// (PI + ff), so the integrator does not wind up while ff alone sits near the limit
+FOC_INLINE float PI_Step_FF(PI_Controller_t *controller, float error, float ff)
+{
+    float integral = controller->Ki_Ts * error;
+    float output = controller->Kp * error + controller->integral + ff;
+
+    if (controller->output_limit >= 0.0f)
+    {
+        float saturated_output = CONSTRAIN(output, -(controller->output_limit), controller->output_limit);
+        integral += (saturated_output - output) * controller->Kb_Ts;
+        output = saturated_output;
+    }
+
     controller->integral += integral;
 
     return output;
@@ -1155,6 +1178,7 @@ void FOC_Init(FOC_t *foc, uint32_t pwm_res)
     foc->outputs_enabled = false;
     foc->theta = 0.0f;
     foc->omega = 0.0f;
+    foc->omega_ff = 0.0f;
     foc->startup_timer = 0.0f;
     foc->startup_theta = 0.0f;
     foc->startup_omega = 0.0f;
@@ -1336,6 +1360,7 @@ FOC_FAST_CODE void FOC_Coast(FOC_t *foc)
     foc->is_ref = 0.0f;
     foc->theta = 0.0f;
     foc->omega = 0.0f;
+    foc->omega_ff = 0.0f;
     foc->foc_mode = FOC_IDLE;
     foc->motor_mode = MOTOR_IDLE;
     foc->hfi_on = false; // HFI restarts from the eSMO after the next start
@@ -1515,10 +1540,14 @@ void FOC_Recalc_Params(FOC_t *foc)
 
     float Kp = foc->bldc.Ld * CURRENT_CONTROL_O_BANDWIDTH;
     float Ki = foc->bldc.Rs * CURRENT_CONTROL_O_BANDWIDTH;
+    // q axis tuned on Lq, capped at 2 Ld: an overestimated Lq would push the q crossover
+    // toward PWM_FREQ/10, where the PWM delay eats the phase margin
+    float Lq = (foc->bldc.Lq < 2.0f * foc->bldc.Ld) ? foc->bldc.Lq : 2.0f * foc->bldc.Ld;
+    float Kp_q = Lq * CURRENT_CONTROL_O_BANDWIDTH;
 
     // Reset ID and IQ controller gains
     PI_Change_Params(&(foc->id_ctrl), Kp, Ki, foc->sampling_time);
-    PI_Change_Params(&(foc->iq_ctrl), Kp, Ki, foc->sampling_time);
+    PI_Change_Params(&(foc->iq_ctrl), Kp_q, Ki, foc->sampling_time);
 
     // Update SMO BLDC specifications
     SMO_BLDC_Specs_Update(&(foc->smo), &(foc->bldc), foc->sampling_time);
@@ -1575,10 +1604,19 @@ FOC_FAST_CODE static void FOC_Current_Control(FOC_t *foc)
     // Set current output limits based on bus voltage to prevent overmodulation
     float v_limit = foc->v_bus * ONE_OVER_SQRT3; // Max phase voltage in the linear range
 
+    // Decoupling and back-EMF feedforward from the dq model at foc->omega (low-passed):
+    //   v_d = Rs id + Ld did/dt - omega Lq iq,  v_q = Rs iq + Lq diq/dt + omega (Ld id + psi)
+    // The PIs then only correct the model error. Uses the references, not the measured
+    // currents, so the 6x ripple and the shunt noise do not reach the voltage.
+    foc->omega_ff += FF_OMEGA_ALPHA * (foc->omega - foc->omega_ff);
+    const float omega = foc->omega_ff;
+    const float vd_ff = -omega * foc->bldc.Lq * iq_ref;
+    const float vq_ff = omega * (foc->bldc.Ld * id_ref + foc->bldc.flux);
+
     // Calculate errors and update PI controllers.
     // v_d is the PI output, not an accumulator: the PI already integrates.
     foc->id_ctrl.output_limit = v_limit;
-    foc->v_d = PI_Step(&(foc->id_ctrl), id_ref - foc->i_d);
+    foc->v_d = PI_Step_FF(&(foc->id_ctrl), id_ref - foc->i_d, vd_ff);
 
     // Give Vq whatever headroom Vd left inside the voltage circle.
     // Guard the argument so |v_d| > v_limit cannot produce a NaN.
@@ -1586,7 +1624,7 @@ FOC_FAST_CODE static void FOC_Current_Control(FOC_t *foc)
     float vq_limit = (vq_headroom_sq > 0.0f) ? Fast_Sqrt(vq_headroom_sq) : 0.0f;
 
     foc->iq_ctrl.output_limit = vq_limit;
-    foc->v_q = PI_Step(&(foc->iq_ctrl), iq_ref - foc->i_q);
+    foc->v_q = PI_Step_FF(&(foc->iq_ctrl), iq_ref - foc->i_q, vq_ff);
 }
 
 // Unit phasor conj(G_eff)/|G_eff| of the plant seen by a d/q-frame signal at frequency w_dq
@@ -2083,6 +2121,7 @@ FOC_FAST_CODE static void FOC_BLDC_Startup_Update(FOC_t *foc)
         foc->hfi_control = false;
         foc->theta = 0.0f;
         foc->omega = 0.0f;
+        foc->omega_ff = 0.0f;
         foc->id_ref = 0.0f;
         foc->iq_ref = 0.0f;
         foc->v_d = 0.0f;
